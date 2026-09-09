@@ -6,7 +6,7 @@ from ..config import map_model_name, RESPONSES_DISPLAY_MODEL
 from ..upstream import send_with_fallback
 from ..stream import pipe_sse
 from ..translators.responses import translate_to_chat, translate_stream_events, translate_response_json
-from ..helpers import uid, now, cors_headers
+from ..helpers import uid, now, cors_headers, extract_session_id
 
 
 async def handle_responses_api(body: dict, request: web.Request) -> web.Response | web.StreamResponse:
@@ -21,7 +21,8 @@ async def handle_responses_api(body: dict, request: web.Request) -> web.Response
     if log:
         log.info("model.mapped", {"from": original_model, "to": chat_req["model"]})
 
-    upstream_response = await send_with_fallback(app, chat_req, log)
+    session_id = extract_session_id(request)
+    upstream_response = await send_with_fallback(app, chat_req, log, session_id=session_id)
 
     if isinstance(upstream_response, web.Response):
         return upstream_response

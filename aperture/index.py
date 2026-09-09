@@ -241,6 +241,7 @@ def create_app() -> web.Application:
 
     app["upstream_base_url"] = os.environ.get("UPSTREAM_BASE_URL", "https://opencode.ai/zen/go/v1")
     app["api_key"] = os.environ.get("API_KEY", "")
+    app["default_session_id"] = os.environ.get("OPENCODE_SESSION_ID") or f"lens-{uid()[:16]}"
     app["backup_upstream_base_url"] = os.environ.get("BACKUP_UPSTREAM_BASE_URL", "")
     app["backup_api_key"] = os.environ.get("BACKUP_API_KEY", "")
     app["backup_enabled"] = os.environ.get("BACKUP_ENABLED", "true") == "true"

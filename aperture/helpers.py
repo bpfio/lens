@@ -65,11 +65,25 @@ def cors_headers(extra: dict | None = None) -> dict:
     headers = {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key, x-opencode-session, x-claude-code-session-id, session-id, x-session-id",
     }
     if extra:
         headers.update(extra)
     return headers
+
+
+def extract_session_id(request: web.Request) -> str:
+    """Extract session ID from incoming request headers or fallback to app default."""
+    for header in (
+        "x-opencode-session",
+        "x-claude-code-session-id",
+        "session-id",
+        "x-session-id",
+    ):
+        val = request.headers.get(header)
+        if val:
+            return val
+    return request.app.get("default_session_id", "")
 
 
 async def fetch_upstream(

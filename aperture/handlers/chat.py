@@ -8,7 +8,7 @@ from ..config import map_model_name, CHAT_DISPLAY_MODEL
 from ..upstream import send_with_fallback
 from ..stream import pipe_sse_raw
 from ..translators.dsml import normalize_dsml_tool_calls
-from ..helpers import error_response, cors_headers
+from ..helpers import error_response, cors_headers, extract_session_id
 
 
 async def filter_chat_stream(response) -> AsyncIterator[str]:
@@ -91,7 +91,8 @@ async def handle_chat_completions(body: dict, request: web.Request) -> web.Respo
     if log:
         log.info("model.mapped", {"from": original_model, "to": body["model"]})
 
-    upstream_response = await send_with_fallback(app, body, log)
+    session_id = extract_session_id(request)
+    upstream_response = await send_with_fallback(app, body, log, session_id=session_id)
 
     if isinstance(upstream_response, web.Response):
         return upstream_response

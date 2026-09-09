@@ -77,3 +77,35 @@ async def test_send_chat_request_generic_client_error():
     session.post = AsyncMock(side_effect=ClientError("Unknown client error"))
     resp = await send_chat_request(_make_app_mock(session), {"model": "test"})
     assert resp.status == 502
+
+
+def test_build_auth_headers_with_session():
+    """Auth headers include x-opencode-session when provided or configured on app."""
+    from aperture.upstream import build_auth_headers
+    app = _make_app_mock(None, api_key="sk-abc", default_session_id="default-sid")
+    headers = build_auth_headers(app)
+    assert headers["Authorization"] == "Bearer sk-abc"
+    assert headers["x-opencode-session"] == "default-sid"
+
+    # Explicit session_id overrides default
+    headers_custom = build_auth_headers(app, session_id="custom-sid")
+    assert headers_custom["x-opencode-session"] == "custom-sid"
+
+
+@pytest.mark.asyncio
+async def test_send_chat_request_injects_session_id():
+    """send_chat_request sends x-opencode-session to upstream."""
+    session = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.ok = True
+    session.post = AsyncMock(return_value=mock_resp)
+
+    app = _make_app_mock(session, api_key="sk-test", default_session_id="fallback-sid")
+    await send_chat_request(app, {"model": "test"}, session_id="req-sid")
+
+    assert session.post.call_count == 1
+    call_kwargs = session.post.call_args[1]
+    sent_headers = call_kwargs["headers"]
+    assert sent_headers["x-opencode-session"] == "req-sid"
+

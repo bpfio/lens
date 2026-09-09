@@ -10,7 +10,7 @@ from ..translators.anthropic import (
     translate_anthropic_stream,
     translate_anthropic_json,
 )
-from ..helpers import uid, cors_headers
+from ..helpers import uid, cors_headers, extract_session_id
 
 
 async def handle_anthropic_messages(body: dict, request: web.Request) -> web.Response | web.StreamResponse:
@@ -27,7 +27,8 @@ async def handle_anthropic_messages(body: dict, request: web.Request) -> web.Res
     if log:
         log.info("model.mapped", {"from": original_model, "to": f"{chat_req['model']} (display: {display_model})"})
 
-    upstream_response = await send_with_fallback(app, chat_req, log)
+    session_id = extract_session_id(request)
+    upstream_response = await send_with_fallback(app, chat_req, log, session_id=session_id)
 
     if isinstance(upstream_response, web.Response):
         return upstream_response

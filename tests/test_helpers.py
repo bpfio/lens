@@ -59,3 +59,30 @@ class TestCorsHeaders:
         headers = cors_headers(extra={"X-Custom": "value"})
         assert headers["Access-Control-Allow-Origin"] == "*"
         assert headers["X-Custom"] == "value"
+
+
+class TestExtractSessionId:
+    def test_extract_from_opencode_header(self):
+        from unittest.mock import MagicMock
+        from aperture.helpers import extract_session_id
+        req = MagicMock()
+        req.headers = {"x-opencode-session": "sess-opencode"}
+        req.app = {}
+        assert extract_session_id(req) == "sess-opencode"
+
+    def test_extract_from_claude_code_header(self):
+        from unittest.mock import MagicMock
+        from aperture.helpers import extract_session_id
+        req = MagicMock()
+        req.headers = {"x-claude-code-session-id": "sess-claude"}
+        req.app = {}
+        assert extract_session_id(req) == "sess-claude"
+
+    def test_extract_fallback_to_default(self):
+        from unittest.mock import MagicMock
+        from aperture.helpers import extract_session_id
+        req = MagicMock()
+        req.headers = {}
+        req.app = {"default_session_id": "sess-default"}
+        assert extract_session_id(req) == "sess-default"
+

@@ -22,13 +22,17 @@ def build_upstream_url(app: web.Application) -> str:
     return f"{base_url.rstrip('/')}/chat/completions"
 
 
-def build_auth_headers(app: web.Application) -> dict:
+def build_auth_headers(app: web.Application, session_id: str | None = None) -> dict:
     """Build auth headers for upstream requests."""
     api_key = app.get("api_key", os.environ.get("API_KEY", ""))
-    return {
+    headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
     }
+    sid = session_id or app.get("default_session_id")
+    if sid:
+        headers["x-opencode-session"] = sid
+    return headers
 
 
 async def send_chat_request(
@@ -37,6 +41,7 @@ async def send_chat_request(
     log: Logger | None = None,
     url_override: str | None = None,
     headers_override: dict | None = None,
+    session_id: str | None = None,
 ) -> ClientResponse | web.Response:
     """Send a Chat Completions request to the upstream API.
 
@@ -50,7 +55,10 @@ async def send_chat_request(
     - Unexpected → 502 with INTERNAL_ERROR
     """
     url = url_override or build_upstream_url(app)
-    headers = headers_override or build_auth_headers(app)
+    headers = dict(headers_override) if headers_override else build_auth_headers(app, session_id=session_id)
+    sid = session_id or app.get("default_session_id")
+    if sid and "x-opencode-session" not in headers:
+        headers["x-opencode-session"] = sid
     client = app.get("client")
     model = chat_body.get("model", "")
 
@@ -204,6 +212,7 @@ async def send_with_fallback(
     app: web.Application,
     chat_body: dict,
     log: Logger | None = None,
+    session_id: str | None = None,
 ) -> ClientResponse | web.Response:
     """Send request with primary/backup fallback and circuit breaker.
 
@@ -232,12 +241,12 @@ async def send_with_fallback(
             "fallback_to": app.get("backup_upstream_base_url", ""),
         })
         backup_url = _build_backup_url(app)
-        backup_headers = _build_backup_headers(app)
+        backup_headers = _build_backup_headers(app, session_id=session_id)
         backup_body = _backup_chat_body(chat_body, app)
-        return await send_chat_request(app, backup_body, log, url_override=backup_url, headers_override=backup_headers)
+        return await send_chat_request(app, backup_body, log, url_override=backup_url, headers_override=backup_headers, session_id=session_id)
 
     # Step 1: Try primary
-    resp = await send_chat_request(app, chat_body, log)
+    resp = await send_chat_request(app, chat_body, log, session_id=session_id)
     if _is_success(resp):
         # Success — reset breaker
         app["_cb_failures"] = 0
@@ -261,9 +270,9 @@ async def send_with_fallback(
             "to": app.get("backup_upstream_base_url", ""),
         })
         backup_url = _build_backup_url(app)
-        backup_headers = _build_backup_headers(app)
+        backup_headers = _build_backup_headers(app, session_id=session_id)
         backup_body = _backup_chat_body(chat_body, app)
-        resp = await send_chat_request(app, backup_body, log, url_override=backup_url, headers_override=backup_headers)
+        resp = await send_chat_request(app, backup_body, log, url_override=backup_url, headers_override=backup_headers, session_id=session_id)
 
     return resp
 
@@ -306,12 +315,16 @@ def _build_backup_url(app: web.Application) -> str:
     return f"{base_url.rstrip('/')}/chat/completions"
 
 
-def _build_backup_headers(app: web.Application) -> dict:
+def _build_backup_headers(app: web.Application, session_id: str | None = None) -> dict:
     api_key = app.get("backup_api_key", "")
-    return {
+    headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
     }
+    sid = session_id or app.get("default_session_id")
+    if sid:
+        headers["x-opencode-session"] = sid
+    return headers
 
 
 def _backup_chat_body(chat_body: dict, app: web.Application) -> dict:
