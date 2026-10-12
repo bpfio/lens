@@ -52,6 +52,30 @@ async def test_readyz_endpoint(client):
 
 
 @pytest.mark.asyncio
+async def test_managed_settings_endpoint(client):
+    """Managed settings returns expected schema for Claude Code."""
+    resp = await client.get("/managed/settings")
+    assert resp.status == 200
+    data = await resp.json()
+    assert "uuid" in data
+    assert "checksum" in data
+    assert "settings" in data
+    assert isinstance(data["settings"], dict)
+
+
+@pytest.mark.asyncio
+async def test_api_hello_endpoint(client):
+    """API hello probing returns ok for HEAD and GET."""
+    resp_head = await client.head("/api/hello")
+    assert resp_head.status == 200
+
+    resp_get = await client.get("/api/hello")
+    assert resp_get.status == 200
+    text = await resp_get.text()
+    assert text == "ok"
+
+
+@pytest.mark.asyncio
 async def test_chat_no_auth_returns_401(client):
     resp = await client.post("/v1/chat/completions", json={
         "model": "test",

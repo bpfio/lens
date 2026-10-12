@@ -60,6 +60,21 @@ async def _handle_health(request: web.Request) -> web.Response:
     )
 
 
+async def _handle_managed_settings(request: web.Request) -> web.Response:
+    """Anthropic Claude Code managed settings endpoint."""
+    data = {
+        "uuid": "lens-managed",
+        "checksum": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "settings": {},
+    }
+    return web.json_response(data, headers=cors_headers())
+
+
+async def _handle_api_hello(request: web.Request) -> web.Response:
+    """Probing endpoint for Claude Code (HEAD/GET /api/hello)."""
+    return web.Response(text="ok", headers=cors_headers())
+
+
 # --- Logging middleware ---
 
 @web.middleware
@@ -162,7 +177,7 @@ async def rate_limit_middleware(request: web.Request, handler) -> web.Response:
 
 @web.middleware
 async def auth_middleware(request: web.Request, handler) -> web.Response:
-    if request.method in ("GET", "OPTIONS"):
+    if request.method in ("GET", "HEAD", "OPTIONS"):
         return await handler(request)
 
     # Allow localhost requests without API key (bypassed in production/local use, enforced during tests)
@@ -289,6 +304,9 @@ def create_app() -> web.Application:
     app.router.add_get("/models", _handle_list_models)
     app.router.add_get("/health", _handle_health)
     app.router.add_get("/readyz", _handle_health)
+    app.router.add_get("/managed/settings", _handle_managed_settings)
+    app.router.add_get("/v1/managed/settings", _handle_managed_settings)
+    app.router.add_route("*", "/api/hello", _handle_api_hello)
     app.router.add_post("/{path:.*}", _handle_post)
 
     return app
