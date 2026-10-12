@@ -39,16 +39,24 @@ def get_upstream_urls(app: web.Application) -> dict:
     }
 
 
-def get_upstream_headers(app: web.Application, protocol: str) -> dict:
+def get_upstream_headers(app: web.Application, protocol: str, request: web.Request | None = None) -> dict:
     """Build headers for upstream request."""
     api_key = app.get("api_key", os.environ.get("API_KEY", ""))
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
     }
-    if protocol == "anthropic":
+    if protocol == "responses":
+        headers["x-openai-internal-codex-responses-lite"] = "true"
+        if request:
+            for k, v in request.headers.items():
+                if k.lower().startswith("x-openai-"):
+                    headers[k.lower()] = v
+    elif protocol == "anthropic":
         headers["x-api-key"] = api_key
         headers["anthropic-version"] = "2023-06-01"
+        if request and "anthropic-version" in request.headers:
+            headers["anthropic-version"] = request.headers["anthropic-version"]
     return headers
 
 
@@ -94,7 +102,7 @@ async def handle_passthrough(
             headers=cors_headers(),
         )
 
-    headers = get_upstream_headers(app, protocol)
+    headers = get_upstream_headers(app, protocol, request)
     rewritten_body, original_model = rewrite_request_body(body, BACKEND_MODEL, protocol)
 
     if log:
