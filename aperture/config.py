@@ -12,7 +12,7 @@ BACKEND_MODEL: str = os.environ.get("BACKEND_MODEL", "deepseek-v4-flash")
 BACKUP_BACKEND_MODEL: str = os.environ.get("BACKUP_BACKEND_MODEL", BACKEND_MODEL)
 
 # Passthrough mode — when upstream natively supports the protocol
-PASSTHROUGH_MODE: bool = os.environ.get("PASSTHROUGH_MODE", "true").lower() in ("true", "1", "yes")
+PASSTHROUGH_MODE: bool = os.environ.get("PASSTHROUGH_MODE", "false").lower() in ("true", "1", "yes")
 
 # Display model names — returned to the client, never leaks the backend model.
 ANTHROPIC_DISPLAY_MODEL: str = os.environ.get("ANTHROPIC_DISPLAY_MODEL", "claude-fable-5")

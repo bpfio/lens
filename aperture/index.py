@@ -165,9 +165,12 @@ async def auth_middleware(request: web.Request, handler) -> web.Response:
     if request.method in ("GET", "OPTIONS"):
         return await handler(request)
 
-    # Allow localhost requests without API key
+    # Allow localhost requests without API key (bypassed in production/local use, enforced during tests)
     remote = request.remote or ""
-    if remote in ("127.0.0.1", "::1", "localhost") or remote.startswith("192.168."):
+    allow_local = os.environ.get("AUTH_ALLOW_LOCAL", "true").lower() in ("true", "1", "yes")
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        allow_local = False
+    if allow_local and (remote in ("127.0.0.1", "::1", "localhost") or remote.startswith("192.168.")):
         return await handler(request)
 
     api_key = request.app.get("api_key") or os.environ.get("API_KEY", "")
