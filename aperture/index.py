@@ -188,11 +188,24 @@ async def cors_middleware(request: web.Request, handler) -> web.Response:
         raise
 
 
+PUBLIC_UNAUTHENTICATED_PATHS = {
+    "/health",
+    "/readyz",
+    "/api/hello",
+    "/managed/settings",
+    "/v1/managed/settings",
+    "/v1/models",
+    "/models",
+    "/robots.txt",
+    "/favicon.ico",
+}
+
+
 # --- Rate limit middleware ---
 
 @web.middleware
 async def rate_limit_middleware(request: web.Request, handler) -> web.Response:
-    if request.method == "GET":
+    if request.method == "OPTIONS" or request.path in PUBLIC_UNAUTHENTICATED_PATHS:
         return await handler(request)
 
     rate_limiter = request.app.get("rate_limiter")
@@ -230,7 +243,10 @@ async def rate_limit_middleware(request: web.Request, handler) -> web.Response:
 
 @web.middleware
 async def auth_middleware(request: web.Request, handler) -> web.Response:
-    if request.method in ("GET", "HEAD", "OPTIONS"):
+    if request.method == "OPTIONS":
+        return await handler(request)
+
+    if request.method in ("GET", "HEAD") and request.path in PUBLIC_UNAUTHENTICATED_PATHS:
         return await handler(request)
 
     # Allow localhost requests without API key only when explicitly configured
@@ -238,10 +254,18 @@ async def auth_middleware(request: web.Request, handler) -> web.Response:
     allow_local = os.environ.get("AUTH_ALLOW_LOCAL", "false").lower() in ("true", "1", "yes")
     if os.environ.get("PYTEST_CURRENT_TEST"):
         allow_local = False
-    if allow_local and (remote in ("127.0.0.1", "::1", "localhost") or remote.startswith("192.168.")):
+    if allow_local and remote in ("127.0.0.1", "::1", "localhost"):
         return await handler(request)
 
     api_key = request.app.get("api_key") or os.environ.get("API_KEY", "")
+    if not api_key:
+        return error_response(
+            "Server API key is not configured.",
+            "auth_error",
+            "AUTH_CONFIG_MISSING",
+            500,
+        )
+
     auth_response = authenticate(request, api_key)
     if auth_response is not None:
         log = request.get("log")
@@ -328,9 +352,11 @@ async def _client_session_ctx(app: web.Application):
 
 
 def create_app() -> web.Application:
-    # No request body size limit (Claude Code sends large project context)
+    # Capped request body size to prevent OOM (defaults to 32MB, configurable via MAX_BODY_SIZE_MB)
+    max_body_mb = int(os.environ.get("MAX_BODY_SIZE_MB", "32"))
+    client_max_size = (max_body_mb * 1024 * 1024) if max_body_mb > 0 else 0
     logging_middleware_first = logging_middleware  # outermost — wraps everything
-    app = web.Application(client_max_size=0, middlewares=[
+    app = web.Application(client_max_size=client_max_size, middlewares=[
         logging_middleware_first,
         cors_middleware,
         rate_limit_middleware,

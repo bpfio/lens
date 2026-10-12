@@ -1,6 +1,5 @@
-"""Chat Completions handler — passthrough with model override and stream filtering."""
-
 import json
+import os
 from typing import AsyncIterator
 from aiohttp import web
 
@@ -12,8 +11,8 @@ from ..helpers import error_response, cors_headers, extract_session_id
 
 
 async def filter_chat_stream(response) -> AsyncIterator[str]:
-    """Filter SSE stream to strip non-standard fields (reasoning_content, null content)."""
-    MAX_BUF = 0  # Unlimited — Lens controls request body size via client_max_size=0
+    """Filter SSE stream to strip non-standard fields (reasoning_content, null content) and enforce display model."""
+    MAX_BUF = int(os.environ.get("MAX_SSE_BUFFER_BYTES", "2097152"))  # 2MB default guard
     buf = b""
     total = 0
 
@@ -50,35 +49,35 @@ async def filter_chat_stream(response) -> AsyncIterator[str]:
             # Override model to display name (never leak backend model)
             parsed["model"] = CHAT_DISPLAY_MODEL
 
-            modified = False
+            reasoning_stripped = False
             for choice in parsed["choices"]:
                 delta = choice.get("delta")
                 if not delta:
                     continue
                 if "reasoning_content" in delta:
                     del delta["reasoning_content"]
-                    modified = True
-                if delta.get("content") is None:
+                    reasoning_stripped = True
+                if delta.get("content") is None and "tool_calls" not in delta:
                     delta["content"] = ""
 
-            if not modified:
-                yield line.decode("utf-8", errors="replace")
-                continue
-
-            has_content = any(
+            has_payload = any(
                 c.get("finish_reason")
                 or (
                     c.get("delta")
                     and (
-                        (isinstance(c["delta"].get("content"), str) and len(c["delta"]["content"]) > 0)
+                        bool(c["delta"].get("role"))
+                        or (isinstance(c["delta"].get("content"), str) and len(c["delta"]["content"]) > 0)
                         or c["delta"].get("tool_calls") is not None
                     )
                 )
                 for c in parsed["choices"]
             )
 
-            if has_content:
-                yield f"data: {json.dumps(parsed)}"
+            # Drop chunk if it only carried reasoning_content and has no other visible delta
+            if reasoning_stripped and not has_payload:
+                continue
+
+            yield f"data: {json.dumps(parsed)}"
 
 
 async def handle_chat_completions(body: dict, request: web.Request) -> web.Response | web.StreamResponse:

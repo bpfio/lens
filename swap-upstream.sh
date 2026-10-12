@@ -7,16 +7,26 @@ TEMP_FILE=$(mktemp)
 
 trap 'rm -f "$TEMP_FILE"' EXIT
 
+if [ ! -f "$SERVICE_FILE" ]; then
+    echo "ERROR: Service file $SERVICE_FILE does not exist — aborting." >&2
+    exit 1
+fi
+
 # Read current environment variables
-upstream=$(grep -oP '^Environment=UPSTREAM_BASE_URL=\K.*' "$SERVICE_FILE")
-api_key=$(grep -oP '^Environment=API_KEY=\K.*' "$SERVICE_FILE")
+upstream=$(grep -oP '^Environment=UPSTREAM_BASE_URL=\K.*' "$SERVICE_FILE" || true)
+api_key=$(grep -oP '^Environment=API_KEY=\K.*' "$SERVICE_FILE" || true)
 model=$(grep -oP '^Environment=BACKEND_MODEL=\K.*' "$SERVICE_FILE" || true)
 backup_url=$(grep -oP '^Environment=BACKUP_UPSTREAM_BASE_URL=\K.*' "$SERVICE_FILE" || true)
 backup_key=$(grep -oP '^Environment=BACKUP_API_KEY=\K.*' "$SERVICE_FILE" || true)
 backup_model=$(grep -oP '^Environment=BACKUP_BACKEND_MODEL=\K.*' "$SERVICE_FILE" || true)
 
-if [ -z "$backup_url" ]; then
-    echo "ERROR: No backup upstream configured — nothing to swap with." >&2
+if [ -z "$backup_url" ] || [ -z "$backup_key" ]; then
+    echo "ERROR: Backup upstream URL or API key is not configured — aborting swap." >&2
+    exit 1
+fi
+
+if [ -z "$upstream" ] || [ -z "$api_key" ]; then
+    echo "ERROR: Primary upstream URL or API key is not configured — aborting swap." >&2
     exit 1
 fi
 

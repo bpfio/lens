@@ -31,13 +31,38 @@ def main():
     )
     args = parser.parse_args()
 
-    env_path = os.path.join(os.path.dirname(__file__), ".env")
-    if os.path.isfile(env_path):
+    def _load_env_file(filepath: str):
+        if not os.path.isfile(filepath):
+            return
         try:
             from dotenv import load_dotenv
-            load_dotenv(env_path)
+            load_dotenv(filepath)
+            return
         except ImportError:
             pass
+        # Fallback simple parser if python-dotenv is not installed
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip("'\"")
+                    if k and k not in os.environ:
+                        os.environ[k] = v
+        except Exception:
+            pass
+
+    # Check root dir, cwd, and package dir
+    root_env = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    cwd_env = os.path.join(os.getcwd(), ".env")
+    pkg_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    for p in (root_env, cwd_env, pkg_env):
+        if os.path.isfile(p):
+            _load_env_file(p)
+            break
 
     from aiohttp import web
     from .index import create_app

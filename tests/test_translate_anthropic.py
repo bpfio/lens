@@ -92,13 +92,13 @@ class TestTranslateAnthropicToChat:
         result = translate_anthropic_to_chat(body)
         assert result["stop"] == ["\n\n", "stop"]
 
-    def test_max_tokens_minimum_1024(self):
+    def test_max_tokens_preserved(self):
         body = {
             "messages": [{"role": "user", "content": "Hi"}],
             "max_tokens": 50,
         }
         result = translate_anthropic_to_chat(body)
-        assert result["max_tokens"] >= 1024
+        assert result["max_tokens"] == 50
 
     def test_anthropic_model_mapped(self):
         body = {

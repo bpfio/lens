@@ -8,13 +8,15 @@ Two operations:
 """
 
 import json
+import os
 from typing import AsyncIterator
 
 from aiohttp import web, ClientResponse
 
 from .helpers import cors_headers
 
-MAX_SSE_BUFFER = 0  # Unlimited — Lens controls request body size via client_max_size=0
+# Default 2MB limit per SSE stream to protect against unbounded upstream buffering
+MAX_SSE_BUFFER = int(os.environ.get("MAX_SSE_BUFFER_BYTES", "2097152"))
 
 
 async def stream_sse(response: ClientResponse) -> AsyncIterator[dict]:

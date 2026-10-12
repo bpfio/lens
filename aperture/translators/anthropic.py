@@ -155,7 +155,7 @@ def translate_anthropic_to_chat(body: dict, env: dict | None = None) -> dict:
     chat = {
         "model": _translate_model(body.get("model", ""), env),
         "messages": messages,
-        "stream": body.get("stream", False) if "stream" in body else True,
+        "stream": bool(body.get("stream", False)),
     }
 
     # Map parameters
@@ -166,8 +166,10 @@ def translate_anthropic_to_chat(body: dict, env: dict | None = None) -> dict:
     if "stop_sequences" in body:
         chat["stop"] = body["stop_sequences"]
 
-    max_tokens = body.get("max_tokens", 8192)
-    chat["max_tokens"] = max(max_tokens, 1024)
+    if "max_tokens" in body:
+        chat["max_tokens"] = body["max_tokens"]
+    else:
+        chat["max_tokens"] = 8192
 
     # Tools -> function calling
     if "tools" in body and body["tools"]:

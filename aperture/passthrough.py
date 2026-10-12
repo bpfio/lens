@@ -64,7 +64,19 @@ def build_passthrough_url(app: web.Application, request: web.Request, protocol: 
 
     if flavor == "mimo" or (flavor == "auto" and ("xiaomimimo" in base_url or "mimo" in base_url)):
         urls = get_upstream_urls(app)
-        return urls.get(protocol, f"{base_url}/v1/{protocol}")
+        if protocol in urls:
+            return urls[protocol]
+        # Unknown protocol or arbitrary path in mimo flavor: mirror the request path and query
+        req_path = request.rel_url.path
+        if base_url.endswith("/v1") and req_path.startswith("/v1/"):
+            req_path = req_path[3:]
+        elif base_url.endswith("/v1") and req_path == "/v1":
+            req_path = ""
+        query_str = request.rel_url.raw_query_string
+        url = f"{base_url}{req_path}"
+        if query_str:
+            url = f"{url}?{query_str}"
+        return url
 
     # Standard flavor: mirror request path and query string exactly
     req_path = request.rel_url.path
@@ -108,8 +120,10 @@ def get_upstream_headers(app: web.Application, protocol: str, request: web.Reque
 def filter_downstream_headers(upstream_headers) -> dict:
     """Filter hop-by-hop headers while mirroring rate-limits and tracing to client."""
     headers = cors_headers()
+    # RFC 2616 hop-by-hop plus payload-dependent headers stripped because body is decoded/re-encoded
+    stripped_headers = HOP_BY_HOP_HEADERS | {"content-type", "content-encoding", "content-length", "transfer-encoding"}
     for k, v in upstream_headers.items():
-        if k.lower() not in HOP_BY_HOP_HEADERS and k.lower() != "content-type":
+        if k.lower() not in stripped_headers:
             headers[k] = v
     return headers
 
@@ -117,18 +131,21 @@ def filter_downstream_headers(upstream_headers) -> dict:
 def rewrite_request_body(body: dict, target_model: str, protocol: str) -> tuple[dict, str]:
     """Rewrite model name in request body based on MODEL_OVERRIDE_MODE and MODEL_MAP."""
     body_copy = dict(body)
+    has_model = "model" in body_copy
     original_model = body_copy.get("model", "")
     mode = os.environ.get("MODEL_OVERRIDE_MODE", "force").lower()
 
-    if mode == "passthrough":
-        effective_model = original_model or target_model
-    elif mode == "mapped":
-        mmap = get_model_map()
-        effective_model = mmap.get(original_model, original_model or target_model)
-    else:
-        effective_model = target_model
-
-    body_copy["model"] = effective_model
+    # Only inject/rewrite model if request already specifies one or protocol is generative LLM
+    is_gen_protocol = protocol in ("responses", "anthropic", "chat")
+    if has_model or is_gen_protocol:
+        if mode == "passthrough":
+            effective_model = original_model or target_model
+        elif mode == "mapped":
+            mmap = get_model_map()
+            effective_model = mmap.get(original_model, original_model or target_model)
+        else:
+            effective_model = target_model
+        body_copy["model"] = effective_model
 
     # Filter out unsupported tools only if explicitly enabled
     filter_search = os.environ.get("FILTER_WEB_SEARCH", "false").lower() in ("true", "1", "yes")
@@ -250,9 +267,12 @@ async def handle_passthrough(
         )
         await resp.prepare(request)
 
+        max_sse_bytes = int(os.environ.get("MAX_SSE_BUFFER_BYTES", "2097152"))
         buf = b""
         async for chunk in upstream_resp.content.iter_any():
             buf += chunk
+            if max_sse_bytes > 0 and len(buf) > max_sse_bytes:
+                raise RuntimeError("SSE single-line buffer exceeded limit")
             lines = buf.split(b"\n")
             buf = lines.pop() if lines else b""
             for line in lines:
