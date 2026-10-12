@@ -60,9 +60,9 @@ def build_passthrough_url(app: web.Application, request: web.Request, protocol: 
     base_url = app.get("upstream_base_url", os.environ.get("UPSTREAM_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1"))
     base_url = base_url.rstrip("/")
 
-    flavor = os.environ.get("UPSTREAM_FLAVOR", "standard").lower()
+    flavor = os.environ.get("UPSTREAM_FLAVOR", "auto").lower()
 
-    if flavor == "mimo":
+    if flavor == "mimo" or (flavor == "auto" and ("xiaomimimo" in base_url or "mimo" in base_url)):
         urls = get_upstream_urls(app)
         return urls.get(protocol, f"{base_url}/v1/{protocol}")
 

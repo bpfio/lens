@@ -251,3 +251,53 @@ tests/test_upstream_limiter.py ......                                    [100%]
 | Responses 纯工具调用流 | 客户端报错 item_0 未闭合 | 状态机严密闭合，端到端 0 异常 | ✅ 通过 |
 | Anthropic R1 思考流 | reasoning_content 被直接丢弃 | 正确转换为 thinking delta 增量输出 | ✅ 通过 |
 | DSML 布尔与数字参数 | 误转换为字符串 "true" / "123" | 保持原生 JSON boolean / number 类型 | ✅ 通过 |
+
+
+### 4. 生产运行态端到端实机验证（Xiaomi MiMo 原生多协议直通）
+
+在本地常驻服务 `lens.service` 真实运行态中，针对生产 Xiaomi MiMo 上游，实机执行官方客户端调用验收：
+
+#### (1) OpenAI Codex CLI 真实端到端实测
+```bash
+codex exec "echo 'lens_mimo_responses_passthrough_test'"
+```
+- **客户端回显输出**：
+  ```text
+  user
+  echo 'lens_mimo_responses_passthrough_test'
+  codex
+  I’ll run the requested command and report its output.
+  exec
+  /bin/bash -lc "echo 'lens_mimo_responses_passthrough_test'" in /home/yupeng/lens
+   succeeded in 172ms:
+  lens_mimo_responses_passthrough_test
+  codex
+  lens_mimo_responses_passthrough_test
+  tokens used
+  14,082
+  ```
+- **网关底层链路日志**（`tail -n 10 /home/yupeng/lens/logs/lens.log`）：
+  ```json
+  {"level": "info", "event": "route.detect", "route": "responses", "path": "v1/responses", "method": "POST", "passthrough": true, "capabilities": ["chat", "responses", "anthropic"]}
+  {"level": "info", "event": "passthrough.request", "method": "POST", "protocol": "responses", "url": "https://token-plan-cn.xiaomimimo.com/v1/responses", "from_model": "gpt-5.6-sol", "to_model": "mimo-v2.6-flash"}
+  {"level": "info", "event": "passthrough.response", "status": 200, "content_type": "text/event-stream"}
+  ```
+- **验证结论**：直接以原生 Responses API 直通 Xiaomi MiMo 的 `/v1/responses` 端点，成功完成工具调用调度与执行，0 降级为 Chat Completions，0 协议失真。
+
+#### (2) Anthropic Claude Code CLI 真实端到端实测
+```bash
+claude -p "请输出 lens_claude_mimo_passthrough_ok"
+```
+- **客户端回显输出**：
+  ```text
+  lens_claude_mimo_passthrough_ok
+  ```
+- **网关底层链路日志**（`tail -n 10 /home/yupeng/lens/logs/lens.log`）：
+  ```json
+  {"level": "info", "event": "request.start", "method": "HEAD", "path": "/api/hello"}
+  {"level": "info", "event": "request.end", "status": 200, "elapsed_ms": 0}
+  {"level": "info", "event": "route.detect", "route": "anthropic", "path": "v1/messages", "method": "POST", "passthrough": true, "capabilities": ["chat", "responses", "anthropic"]}
+  {"level": "info", "event": "passthrough.request", "method": "POST", "protocol": "anthropic", "url": "https://token-plan-cn.xiaomimimo.com/anthropic/v1/messages", "from_model": "claude-fable-5", "to_model": "mimo-v2.6-flash"}
+  {"level": "info", "event": "passthrough.response", "status": 200, "content_type": "text/event-stream"}
+  ```
+- **验证结论**：`HEAD /api/hello` 探测即时响应，随后请求 100% 直通 Xiaomi MiMo 原生 Anthropic 端点 `/anthropic/v1/messages`，SSE 流式完整保真，退出码 0。
