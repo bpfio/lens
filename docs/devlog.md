@@ -508,3 +508,16 @@ gpt-5.6-sol
 - 新增 `tests/test_audit_fixes.py` 覆盖 13 项安全与契约测试。
 - 全量运行测试套件：`146 passed in 4.31s`（通过率 100%）。
 
+### 6. Claude Code CLI 与 Codex CLI 客户端兼容性评估
+- **Claude Code CLI 兼容性**：
+  - 初始化探测路由 `/managed/settings` 与 `/v1/models` 作为本地静态配置纳入只读白名单，握手探测零阻碍；
+  - 出站 Header 剥离 `content-encoding` 彻底消除了下游明文正文与 gzip 响应头脱钩引起的二次解压崩溃；
+  - 32MB 请求体限制（`MAX_BODY_SIZE_MB`）完全容纳大型代码库上下文与长提示词，能力零损耗。
+- **Codex CLI 兼容性**：
+  - `/v1/responses` 协议透明转发链路保持原样，双向模型名称映射（`gpt-5.6-sol` ↔ `mimo-v2.6-flash`）正常工作，杜绝元数据回退警告；
+  - Codex 专属私有头 `x-openai-internal-codex-responses-lite: true` 与 `web_search` 插件自动过滤逻辑完整保持；
+  - SSE 流式净化管道在维持模型标识的同时剔除了纯 reasoning 碎片，保证代码补全与编辑流顺畅无误。
+- **部署与认证注意事项**：
+  - 本机开发：同机部署保持 `AUTH_ALLOW_LOCAL=true`，本地回环（`127.0.0.1`）访问两款 CLI 维持免密直通；
+  - 远程/跨节点访问：封堵 `192.168.*` 泛免密后，异机调用需在客户端显式配置 `Authorization: Bearer <API_KEY>`。
+
