@@ -19,6 +19,8 @@ from .handlers.chat import handle_chat_completions
 from .handlers.responses import handle_responses_api
 from .handlers.anthropic import handle_anthropic_messages
 from .upstream_limiter import UpstreamRateLimiter
+from .config import PASSTHROUGH_MODE
+from .passthrough import handle_passthrough
 
 
 VERSION = "1.0.0"
@@ -205,7 +207,10 @@ async def _handle_post(request: web.Request) -> web.Response:
     route = _detect_route(path, body)
 
     if log:
-        log.info("route.detect", {"route": route, "path": path})
+        log.info("route.detect", {"route": route, "path": path, "passthrough": PASSTHROUGH_MODE})
+
+    if PASSTHROUGH_MODE:
+        return await handle_passthrough(body, request, route)
 
     if route == "chat":
         return await handle_chat_completions(body, request)

@@ -11,10 +11,13 @@ BACKEND_MODEL: str = os.environ.get("BACKEND_MODEL", "deepseek-v4-flash")
 # Backup backend model — used when falling back to backup upstream.
 BACKUP_BACKEND_MODEL: str = os.environ.get("BACKUP_BACKEND_MODEL", BACKEND_MODEL)
 
+# Passthrough mode — when upstream natively supports the protocol
+PASSTHROUGH_MODE: bool = os.environ.get("PASSTHROUGH_MODE", "true").lower() in ("true", "1", "yes")
+
 # Display model names — returned to the client, never leaks the backend model.
-ANTHROPIC_DISPLAY_MODEL: str = "claude-fable-5"
-RESPONSES_DISPLAY_MODEL: str = "gpt-5.6-sol"
-CHAT_DISPLAY_MODEL: str = "gpt-5.6-sol"
+ANTHROPIC_DISPLAY_MODEL: str = os.environ.get("ANTHROPIC_DISPLAY_MODEL", "claude-fable-5")
+RESPONSES_DISPLAY_MODEL: str = os.environ.get("RESPONSES_DISPLAY_MODEL", "gpt-5.6-sol")
+CHAT_DISPLAY_MODEL: str = os.environ.get("CHAT_DISPLAY_MODEL", "gpt-5.6-sol")
 
 
 def get_env_str(key: str, default: str = "") -> str:
