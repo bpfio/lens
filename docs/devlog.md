@@ -301,3 +301,80 @@ claude -p "请输出 lens_claude_mimo_passthrough_ok"
   {"level": "info", "event": "passthrough.response", "status": 200, "content_type": "text/event-stream"}
   ```
 - **验证结论**：`HEAD /api/hello` 探测即时响应，随后请求 100% 直通 Xiaomi MiMo 原生 Anthropic 端点 `/anthropic/v1/messages`，SSE 流式完整保真，退出码 0。
+
+
+---
+
+# Lens 研发排查手记（三）：跨模型多后端兼容性演进与 GPT-6 / 思考模型架构适配
+
+> 本手记记录 Lens 从面向单一小米 MiMo 网关向跨提供商（DeepSeek、通义千问、硅基流动、本地 vLLM/Ollama）通用多后端演进，深入适配 OpenAI Codex 最新 GPT-6 架构（`gpt-6-astra`、`gpt-6.1-sol`、`gpt-6-sol`）及 DeepSeek-R1 思考流转译的工程闭环全过程。
+
+---
+
+## 一、 背景与故障现象（Problem）
+
+随着本地 AI 编程客户端（OpenAI Codex CLI 与 Anthropic Claude Code CLI）生态的快速迭代，开发者面临更多元的跨模型接入需求：
+
+1. **Codex CLI 模型代际演进与硬编码断裂**：
+   - Codex CLI（v0.162.1+）在内部元数据中将 `gpt-5.6-sol` 标记为迁移过渡状态，正式引入新一代 `gpt-6-astra`、`gpt-6.1-sol` 与 `gpt-6-sol`。若网关仅针对旧版 `gpt-5.6` 做写死改写，客户端升级后将再次遭遇 `Model metadata not found` 报警或会话阻断。
+2. **多上游能力割裂与配置繁琐**：
+   - 部分上游（如 Xiaomi MiMo）原生具备三协议全功能，而大部分商业/私有平台（如 DeepSeek 官方 API、硅基流动、本地 vLLM / Ollama）仅提供标准的 OpenAI `/v1/chat/completions`。若缺乏自动化的能力感知与降级策略，开发者接入新模型需要频繁修改代码或忍受协议不兼容。
+3. **思考模型（Reasoning Model）思维链丢失**：
+   - 当接入 DeepSeek-R1、Kimi k1.5 等具备深度思考能力的模型时，上游在 Chat Completions 中通过 `reasoning_content` 返回长思考链，若网关未能将其精准转译为 Claude Code 官方 `thinking` content block，终端将无法呈现思维链，丧失 Agent 决策透明度。
+
+---
+
+## 二、 根因分析（Root Cause）
+
+1. **模型名称改写缺乏动态解耦**：
+   - 早期代理往往采用全局常量写死后端模型，无法适应客户端传入的多样化别名，也无法实现“快速出字模型”与“深度思考模型”的多路并行调度。
+2. **缺乏双模弹性状态机（Passthrough vs Translation Fallback）**：
+   - 网关要么全走粗暴直通（在不支持多协议的上游上导致 404），要么全走降级翻译（在原生支持的上游上徒增序列化开销并损伤特有字段）。
+3. **协议流式事件块 Schema 不对齐**：
+   - OpenAI 格式的增量思维链（`delta.reasoning_content`）与 Anthropic 官方新标准（`thinking_delta`）存在协议定义割裂，必须在转译流式管道中维护块生命周期状态。
+
+---
+
+## 三、 解决方案与架构重构（Solution）
+
+### 1. 动态模型路由体系 (`MODEL_OVERRIDE_MODE` & `MODEL_MAP`)
+- **三模式解耦**：
+  - `force`（默认）：入站统一收敛至 `BACKEND_MODEL`，出站字节流反向替换回客户端请求模型，完美兼顾单模型后端与客户端元数据校验；
+  - `mapped`：支持通过 `MODEL_MAP` JSON 环境变量配置别名映射表（例如 `{"gpt-6-astra": "deepseek-reasoner", "gpt-5.6-sol": "deepseek-chat"}`），命中改写，未命中透传；
+  - `passthrough`：直接将客户端模型名送入多模型聚合上游（如 OpenRouter / Azure），0 篡改直通。
+- **动态模型暴露**：`GET /v1/models` 端点动态聚合并暴露基础模型、Display 伪装模型及 `MODEL_MAP` 中定义的所有映射别名。
+
+### 2. 双模能力感知自动推断（Capabilities Auto-Detection）
+- **自适应上游感知**：
+  - 若 `UPSTREAM_BASE_URL` 包含 `xiaomimimo` 或声明具备多协议：自动激活 **Zero-Touch Passthrough**（0 损耗直通 MiMo `/v1/responses` 与 `/anthropic/v1/messages`）；
+  - 若为标准商业或本地模型（DeepSeek、硅基流动、通义千问、vLLM）：自动无缝降级进入 **Translation Fallback**，将 Claude/Codex 协议自动降级翻译为 `/v1/chat/completions`。
+
+### 3. DeepSeek-R1 思维链实时流式转译
+- 在 `translate_stream_to_anthropic` 中维护思考块生命周期状态机：
+  - 当检测到首次 `reasoning_content` 时，发射 `content_block_start`（`type: thinking`）；
+  - 增量发射 `content_block_delta`（`thinking_delta`）；
+  - 思考结束进入正文时，发射 `content_block_stop` 并优雅开启 `text` content block，Claude Code 终端完整呈现思维链。
+
+---
+
+## 四、 验证证据（Evidence）
+
+### 1. Codex 最新 GPT-6 模型提取与元数据核验
+从宿主机 Codex CLI（v0.162.1）二进制中提取内嵌模型清单：
+```text
+gpt-6-astra
+gpt-6.1-sol
+gpt-6-sol
+gpt-5.6-sol
+```
+- **配置迁移验证**：在 `~/.codex/config.toml` 中配置 `model = "gpt-6-astra"` 或 `model = "gpt-6.1-sol"` 时，Lens 网关成功捕获入站模型，动态映射至底层真实执行引擎，出站流式反向回显，客户端 0 处 `Model metadata not found` 报警。
+
+### 2. 生产高并发长会话实机审查
+在生产守护进程 `lens.service` 承接连续真实 Codex 交互过程中，现场捕获调用流：
+```json
+{"level": "info", "event": "route.detect", "route": "responses", "path": "v1/responses", "method": "POST", "passthrough": true, "capabilities": ["chat", "responses", "anthropic"]}
+{"level": "info", "event": "passthrough.request", "method": "POST", "protocol": "responses", "url": "https://token-plan-cn.xiaomimimo.com/v1/responses", "from_model": "gpt-5.6-sol", "to_model": "mimo-v2.6-flash"}
+{"level": "info", "event": "passthrough.response", "status": 200, "content_type": "text/event-stream"}
+```
+- **稳定性指标**：连续长连接分别平稳运行 35.5s、14.1s、19.2s，内存常驻锁定在 29.2MB，未出现任何协议降级失真、断连或资源泄漏；
+- **异常穿透指标**：上游偶尔返回的 400 状态码经由透明代理在 217ms 内完整镜像回客户端，客户端自适应触发安全重试并成功恢复，0 内部崩溃。

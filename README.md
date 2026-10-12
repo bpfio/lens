@@ -1,96 +1,135 @@
 # Lens
 
-> *本项目从 [Aperture](https://github.com/YKaiXu/aperture)（TypeScript / Cloudflare Workers）移植到 Python，用于在 OpenWRT 等轻量边缘环境中部署。*
+> *本项目从 [Aperture](https://github.com/YKaiXu/aperture)（TypeScript / Cloudflare Workers）移植到 Python，为 OpenAI Codex CLI、Claude Code CLI 与现代 Agentic 开发者工具提供统一的 AI 协议镜像与透传代理。*
 
-**Lens** 是一个 AI 协议翻译器——在客户端与上游 API 之间转换请求/响应的轻量代理。
+**Lens** 是一个具备**能力感知、全路径镜像、双向头部透传与动态模型路由**的现代 AI 代理网关。它支持双模架构：上游具备原生多协议支持（如 Xiaomi MiMo）时实施 0 损耗直通，单协议上游（如 DeepSeek、OpenCode、vLLM）时实施降级转译。
 
 ```
-你的应用 (Chat Completions API)         上游提供商
-       │                                       ▲
-       │  POST /v1/chat/completions            │
-       │  { messages, model, ... }             │ Anthropic Messages API
-       │                                       │ 或 Responses API
-       │                                       │ 或 Chat Completions
-       ▼                                       │
-    ┌──────────────────────────────────────────┴─┐
-    │                   Lens                      │
-    │                                             │
-    │  Anthropic Messages  ↔  Chat Completions    │
-    │  OpenAI Responses    ↔  Chat Completions    │
-    │  DSML ↔ OpenAI tool_calls                   │
-    └─────────────────────────────────────────────┘
+  客户端 (Codex CLI / Claude Code / 任意应用)
+       │
+       │  POST /v1/responses (Codex)
+       │  POST /v1/messages (Claude Code)
+       │  POST /v1/chat/completions (OpenAI)
+       │  GET/POST/DELETE /* (衍生端点)
+       ▼
+  ┌────────────────────────────────────────────────────────────┐
+  │                           Lens                             │
+  │                                                            │
+  │   ┌────────────────────────────────────────────────────┐   │
+  │   │  能力感知路由层 (Capabilities State Machine)       │   │
+  │   └─────────────┬────────────────────────┬─────────────┘   │
+  │                 │                        │                 │
+  │   [原生多协议上游]                       [单模型 Chat 上游] │
+  │   Zero-Touch Passthrough                 降级转译引擎       │
+  │   • 全 HTTP 方法与 Query 严格镜像        • Responses ↔ Chat│
+  │   • 双向 Headers 镜像 (追踪/限流)        • Anthropic ↔ Chat│
+  │   • 字节级流式双向模型名伪装             • Thinking 流式转译│
+  │   • 0 序列化开销，0 模型能力损耗         • DSML 强类型纠错  │
+  └─────────────────┬────────────────────────┬─────────────────┘
+                    │                        │
+                    ▼                        ▼
+           原生多协议提供商            标准 Chat 提供商
+        (Xiaomi MiMo / OpenAI)      (DeepSeek / 阿里 / 本地vLLM)
 ```
 
-## 功能
+---
 
-- **协议翻译** — Anthropic Messages API ↔ Chat Completions、OpenAI Responses API ↔ Chat Completions
-- **流式响应** — 所有协议均支持完整 SSE 流式传输
-- **DSML 支持** — DeepSeek 风格 `<dsml>` XML 工具调用标准化
-- **身份认证** — API Key 验证（Bearer Token 或 x-api-key 请求头）
-- **速率限制** — 滑动窗口限流器，可配置窗口和最大请求数
-- **CORS** — 可配置的跨域请求头
-- **主备回退** — 上游超时/断连/5xx 时自动切换到备用上游重试
-- **一键切换** — `swap-upstream.sh` 一键互换主备上游
-- **轻量运行** — 仅依赖 `aiohttp`，纯 Python，运行内存约 27MB
+## 核心特性
+
+- **双模弹性架构** — 原生多协议上游 Zero-Touch 0 损耗直通；单协议上游全自动降级转译，无缝承接。
+- **全方法与路径镜像** — 通配支持 GET/POST/DELETE/PUT/HEAD，完整保留 URL 相对路径与 Query 字符串（如分页游标 `cursor`、`limit`）。
+- **双向 Headers 镜像** — 剥离 RFC 2616 Hop-by-hop 传输头，上行完整保留 `traceparent` 等分布式追踪头，下行镜像上游 `x-ratelimit-*` 与 `retry-after` 指标。
+- **动态模型路由** — 支持 `force`（强制单模型）、`mapped`（按 JSON 别名映射）、`passthrough`（完全直通）三种模式；动态暴露 `/v1/models`。
+- **主流 CLI 开箱即用**：
+  - **OpenAI Codex CLI**：支持最新 GPT-6（`gpt-6-astra`、`gpt-6.1-sol`、`gpt-6-sol`）及 GPT-5.6，透传 `responses-lite` 头，消除 `Model metadata not found` 报警。
+  - **Anthropic Claude Code CLI**：内置拦截响应 `HEAD /api/hello` 与 `GET /managed/settings`，支持 DeepSeek-R1 思考流转官方 `thinking` block。
+- **DSML 强类型解析** — 自动将 DeepSeek 等模型输出的 `<dsml>` XML 标签反序列化为强类型 JSON tool_calls（支持 boolean、number、null）。
+- **极致轻量** — 仅依赖 `aiohttp`，生产常驻内存仅 **26~29MB**，CPU 消耗趋近于 0。
+
+---
 
 ## 快速开始
 
 ```bash
 pip install aiohttp
 
-# 克隆并运行
-git clone https://github.com/YKaiXu/lens.git
+# 克隆并进入目录
+git clone https://github.com/bpfio/lens.git
 cd lens
 
-API_KEY=sk-your-key \
-UPSTREAM_BASE_URL=https://api.example.com/v1 \
+# 启动服务（以接入 Xiaomi MiMo 为例）
+API_KEY=your-mimo-key \
+BACKEND_MODEL=mimo-v2.6-flash \
+UPSTREAM_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1 \
+PASSTHROUGH_MODE=true \
 python3 -m aperture
 ```
 
-## 配置
+---
+
+## 核心配置项
+
+可通过环境变量或创建私有 `.env` 文件进行配置：
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `API_KEY` | — | 必填。客户端请求的认证密钥 |
-| `UPSTREAM_BASE_URL` | `https://opencode.ai/zen/go/v1` | 上游 Chat Completions API 地址 |
-| `BACKUP_UPSTREAM_BASE_URL` | `""` | 备用上游地址（留空则关闭回退） |
-| `BACKUP_API_KEY` | `""` | 备用上游的 API Key |
-| `BACKUP_ENABLED` | `true` | 回退开关，设为 `false` 则禁用（即使配置了 URL） |
-| `APERTURE_HOST` | `0.0.0.0` | 监听地址 |
+| `API_KEY` | — | 必填。上游访问凭证，同时用于客户端请求认证 |
+| `UPSTREAM_BASE_URL` | `https://opencode.ai/zen/go/v1` | 上游 API 基础地址 |
+| `BACKEND_MODEL` | `deepseek-v4-flash` | 上游真实调用的模型标识 |
+| `UPSTREAM_CAPABILITIES` | `auto` | 上游原生支持的协议，逗号分隔（如 `responses,anthropic,chat`）。`auto` 会根据 URL 自动推断 |
+| `UPSTREAM_FLAVOR` | `auto` | 上游协议风格（`standard` 或 `mimo`）。`auto` 下包含 `xiaomimimo` 自动识别为 mimo |
+| `MODEL_OVERRIDE_MODE` | `force` | 模型改写模式：`force`（强制覆盖）、`mapped`（规则映射）、`passthrough`（完全直通） |
+| `MODEL_MAP` | `""` | JSON 格式的模型别名映射字典（`mapped` 模式下生效） |
+| `AUTH_ALLOW_LOCAL` | `false` | 是否放行本地回环（127.0.0.1）免密访问 |
+| `APERTURE_HOST` | `127.0.0.1` | 监听地址 |
 | `APERTURE_PORT` | `8080` | 监听端口 |
-| `REQUEST_TIMEOUT_MS` | `120000` | 上游请求超时时间（毫秒） |
-| `UPSTREAM_RPM` | `39` | 上游 RPM 限速（0=关闭）。超限请求自动排队等待，不会返回 429 |
-| `RATE_LIMIT_WINDOW_MS` | `60000` | 入站限流窗口（毫秒） |
-| `RATE_LIMIT_MAX` | `120` | 入站每窗口最大请求数 |
-| `LOG_DIR` | `/var/log/lens` | 日志目录（10MB 自动轮转） |
+| `REQUEST_TIMEOUT_MS` | `120000` | 超时时间（毫秒） |
+| `LOG_DIR` | `/var/log/lens` | 结构化日志写入目录 |
 
-### 主备回退逻辑
+---
 
-```
-主上游成功 (2xx/3xx)  → 正常返回，不触发回退
-主上游 4xx            → 不重试，直接返回
-主上游 5xx            → 自动切换到备用上游重试一次
-主上游超时/断连       → 自动切换到备用上游重试一次
-备用也失败            → 返回最终错误
-```
+## 多模型接入场景示例
 
-`BACKUP_ENABLED=false` 或 `BACKUP_UPSTREAM_BASE_URL` 为空时，回退功能完全关闭，行为与无回退时一致。
-
-### 一键切换主备
-
+### 1. 接入 Xiaomi MiMo（原生多协议直通）
 ```bash
-sudo ./swap-upstream.sh
+UPSTREAM_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
+API_KEY=tp-your-mimo-key
+BACKEND_MODEL=mimo-v2.6-flash
+PASSTHROUGH_MODE=true
 ```
 
-互换主上游和备用上游的配置，重启 Lens 服务。无额外依赖。
-
-## Codex CLI 支持
-
-Lens 完整支持 OpenAI Codex CLI（Responses API 协议 + 工具调用）。
-
+### 2. 接入 DeepSeek 官方 API（自动转译与 Thinking 流式）
 ```bash
-# 配置 ~/.codex/config.toml
-model = "gpt-5.6-sol"
+UPSTREAM_BASE_URL=https://api.deepseek.com/v1
+API_KEY=sk-your-deepseek-key
+BACKEND_MODEL=deepseek-chat            # 或 deepseek-reasoner (R1 思考模型)
+PASSTHROUGH_MODE=false
+```
+
+### 3. 接入本地私有 vLLM / Ollama（完全离线）
+```bash
+UPSTREAM_BASE_URL=http://127.0.0.1:8000/v1
+API_KEY=none
+BACKEND_MODEL=qwen2.5-coder-7b
+AUTH_ALLOW_LOCAL=true
+```
+
+### 4. 多模型精细路由（动态映射）
+```bash
+MODEL_OVERRIDE_MODE=mapped
+MODEL_MAP='{"gpt-5.6-sol": "deepseek-chat", "gpt-6-astra": "deepseek-reasoner", "claude-fable-5": "deepseek-reasoner"}'
+```
+
+---
+
+## 客户端配置指南
+
+### OpenAI Codex CLI
+
+编辑 `~/.codex/config.toml`：
+```toml
+# 支持指定 gpt-6-astra, gpt-6.1-sol, gpt-6-sol 或 gpt-5.6-sol
+model = "gpt-6-astra"
 model_provider = "lens"
 
 [model_providers.lens]
@@ -100,35 +139,45 @@ wire_api = "responses"
 env_key = "LENS_API_KEY"
 ```
 
-详细配置、踩坑记录与调试方法论见 [docs/codex-cli.md](docs/codex-cli.md)。
+### Anthropic Claude Code CLI
 
-**Token 效率**：Lens 是零开销透传，不会造成 token 浪费（实测与直连上游消耗一致）——见 [docs/token-efficiency.md](docs/token-efficiency.md)。
+编辑 `~/.claude/settings.json`：
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8080",
+    "ANTHROPIC_MODEL": "claude-fable-5[1m]",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-fable-5[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-fable-5[1m]"
+  }
+}
+```
 
-## 架构
+---
 
-Lens 采用清晰的三层架构：
-
-1. **Translators（翻译层）** — 纯函数，在 API 格式之间转换
-2. **Handlers（处理层）** — 编排层：翻译 → 上游调用 → 反向翻译
-3. **Middleware（中间件）** — CORS → 限流 → 认证（顺序有讲究）
-
-## 测试
+## 自动化测试与验证
 
 ```bash
 pip install pytest pytest-asyncio pytest-aiohttp
-pytest tests/
+PYTHONDONTWRITEBYTECODE=1 pytest tests/ -v
 ```
 
-## 部署
+当前内置 133 项自动化测试（覆盖全方法镜像、双向 Headers 透传、Responses 状态机、Anthropic thinking 流式、DSML 强类型解析等核心契约）。
+
+---
+
+## 守护进程部署 (systemd)
 
 ```bash
-# 安装 systemd 服务
+# 复制配置文件模板
+cp .env.example .env
+chmod 600 .env
+
+# 配置 systemd 服务
 sudo cp lens.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now lens
 
-# 查看日志
-sudo journalctl -u lens -f
-# 或查看文件日志
-tail -f /var/log/lens/lens.log
+# 查看实时日志
+tail -f /home/yupeng/lens/logs/lens.log
 ```
