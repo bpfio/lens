@@ -98,12 +98,22 @@ async def handle_chat_completions(body: dict, request: web.Request) -> web.Respo
         return upstream_response
 
     if not upstream_response.ok:
+        err_text = ""
+        try:
+            err_text = await upstream_response.text()
+        except Exception:
+            pass
+        finally:
+            if hasattr(upstream_response, "release"):
+                upstream_response.release()
         if log:
             log.error("upstream.bad_status", {
                 "status": upstream_response.status,
                 "model": body["model"],
+                "detail": err_text[:500] if err_text else "",
             })
-        return error_response("Upstream request failed", "upstream_error", "UPSTREAM", upstream_response.status)
+        msg = f"Upstream request failed: {err_text[:200]}" if err_text else "Upstream request failed"
+        return error_response(msg, "upstream_error", "UPSTREAM", upstream_response.status)
 
     if body.get("stream"):
         log and log.info("response.streaming", {"format": "sse"})

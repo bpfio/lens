@@ -168,18 +168,26 @@ def translate_to_chat(body: dict) -> dict:
                 if isinstance(content, str):
                     messages.append({"role": "user", "content": content})
                 elif isinstance(content, list):
-                    texts = []
+                    user_parts = []
+                    has_image = False
                     for block in content:
                         if not isinstance(block, dict):
                             continue
                         btype = block.get("type", "")
                         if btype == "input_text":
-                            texts.append(block.get("text", ""))
+                            user_parts.append({"type": "text", "text": block.get("text", "")})
                         elif btype == "input_image":
                             img_url = block.get("image_url", {})
                             if isinstance(img_url, dict) and img_url.get("url"):
-                                texts.append(f"[Image: {img_url['url']}]")
-                    messages.append({"role": "user", "content": "".join(texts)})
+                                has_image = True
+                                user_parts.append({
+                                    "type": "image_url",
+                                    "image_url": {"url": img_url["url"]},
+                                })
+                    if has_image:
+                        messages.append({"role": "user", "content": user_parts})
+                    else:
+                        messages.append({"role": "user", "content": "".join(p.get("text", "") for p in user_parts)})
 
             elif role == "assistant":
                 if isinstance(content, str):
@@ -225,10 +233,6 @@ def translate_to_chat(body: dict) -> dict:
         chat["stop"] = body["stop"]
 
     # Map tools
-    # Both Responses API and Chat Completions use:
-    #   {"type":"function", "function":{"name":"...", "description":"...", "parameters":{...}}}
-    # Also handle legacy flat format: {"name":"...", "description":"...", "parameters":{...}}
-    # codex CLI may send tools via input[].additional_tools (type: custom) — merge those too.
     tools = []
     if "tools" in body and body["tools"]:
         for t in body["tools"]:
@@ -239,6 +243,9 @@ def translate_to_chat(body: dict) -> dict:
                 norm = _normalize_tool(t)
                 if norm:
                     tools.append(norm)
+            elif ttype in ("web_search", "web_search_preview", "file_search", "code_interpreter"):
+                # Forward hosted tools
+                tools.append(t)
     for t in additional_tools:
         norm = _normalize_tool(t)
         if norm:
@@ -264,25 +271,10 @@ async def translate_stream_events(
 
     Yields {event, data} dicts for pipe_sse().
     """
-    output_index = 0
-    item_index = 0
-
-    yield {
-        "event": "response.output_item.added",
-        "data": {
-            "type": "response.output_item.added",
-            "output_index": output_index,
-            "item": {
-                "id": f"{resp_id}/item_{item_index}",
-                "type": "message",
-                "role": "assistant",
-                "status": "in_progress",
-                "content": [],
-            },
-        },
-    }
-
     content_index = 0
+    item_index = 0
+    text_item_added = False
+    text_item_id = f"{resp_id}/item_0"
     accumulated_text = ""
     last_finish_reason = None
     tool_call_items: dict[int, dict] = {}
@@ -300,12 +292,27 @@ async def translate_stream_events(
 
             # Text content
             if content:
-                if not accumulated_text:
+                if not text_item_added:
+                    text_item_added = True
+                    yield {
+                        "event": "response.output_item.added",
+                        "data": {
+                            "type": "response.output_item.added",
+                            "output_index": 0,
+                            "item": {
+                                "id": text_item_id,
+                                "type": "message",
+                                "role": "assistant",
+                                "status": "in_progress",
+                                "content": [],
+                            },
+                        },
+                    }
                     yield {
                         "event": "response.content_part.added",
                         "data": {
                             "type": "response.content_part.added",
-                            "output_index": output_index,
+                            "output_index": 0,
                             "part": {
                                 "type": "output_text",
                                 "text": "",
@@ -317,7 +324,7 @@ async def translate_stream_events(
                     "event": "response.output_text.delta",
                     "data": {
                         "type": "response.output_text.delta",
-                        "output_index": output_index,
+                        "output_index": 0,
                         "content_index": content_index,
                         "delta": content,
                     },
@@ -331,8 +338,10 @@ async def translate_stream_events(
                     idx = tc.get("index", 0)
                     if idx not in tool_call_items:
                         item_index += 1
+                        tool_output_idx = (1 if text_item_added else 0) + len(tool_call_items)
                         tool_call_items[idx] = {
                             "item_id": f"{resp_id}/item_{item_index}",
+                            "output_index": tool_output_idx,
                             "name": fn.get("name", ""),
                             "call_id": tc_id,
                             "arguments": "",
@@ -341,7 +350,7 @@ async def translate_stream_events(
                             "event": "response.output_item.added",
                             "data": {
                                 "type": "response.output_item.added",
-                                "output_index": output_index + 1,
+                                "output_index": tool_output_idx,
                                 "item": {
                                     "id": tool_call_items[idx]["item_id"],
                                     "type": "function_call",
@@ -360,7 +369,7 @@ async def translate_stream_events(
                             "event": "response.function_call_arguments.delta",
                             "data": {
                                 "type": "response.function_call_arguments.delta",
-                                "output_index": output_index + 1,
+                                "output_index": tool_call_items[idx]["output_index"],
                                 "item_id": tool_call_items[idx]["item_id"],
                                 "delta": arg_delta,
                             },
@@ -379,14 +388,13 @@ async def translate_stream_events(
                         }
 
     # Finalize text output
-    text_item_id = f"{resp_id}/item_0"
     output_items = []
-    if accumulated_text:
+    if text_item_added and accumulated_text:
         yield {
             "event": "response.output_text.done",
             "data": {
                 "type": "response.output_text.done",
-                "output_index": output_index,
+                "output_index": 0,
                 "content_index": content_index,
                 "text": accumulated_text,
             },
@@ -395,7 +403,7 @@ async def translate_stream_events(
             "event": "response.content_part.done",
             "data": {
                 "type": "response.content_part.done",
-                "output_index": output_index,
+                "output_index": 0,
                 "content_index": content_index,
                 "part": {"type": "output_text", "text": accumulated_text},
             },
@@ -404,7 +412,7 @@ async def translate_stream_events(
             "event": "response.output_item.done",
             "data": {
                 "type": "response.output_item.done",
-                "output_index": output_index,
+                "output_index": 0,
                 "item": {
                     "id": text_item_id,
                     "type": "message",
@@ -425,8 +433,6 @@ async def translate_stream_events(
     # Finalize tool call items
     for idx in sorted(tool_call_items):
         item = tool_call_items[idx]
-        # Emit arguments.done if finish_reason never arrived in the same chunk
-        # as the tool call (common upstream pattern: separate final chunk).
         if idx not in arguments_done_sent:
             yield {
                 "event": "response.function_call_arguments.done",
@@ -441,7 +447,7 @@ async def translate_stream_events(
             "event": "response.output_item.done",
             "data": {
                 "type": "response.output_item.done",
-                "output_index": output_index + 1,
+                "output_index": item["output_index"],
                 "item": {
                     "id": item["item_id"],
                     "type": "function_call",

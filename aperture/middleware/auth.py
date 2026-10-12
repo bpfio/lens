@@ -6,6 +6,7 @@ Validates requests via Authorization: Bearer <key> or x-api-key header.
 Returns None (allowed) or a 401 web.Response (denied).
 """
 
+import hmac
 from aiohttp import web
 from ..helpers import error_response
 
@@ -37,7 +38,7 @@ def authenticate(request: web.Request, api_key: str | None) -> web.Response | No
             401,
         )
 
-    if token != api_key:
+    if not hmac.compare_digest(token, api_key):
         return error_response(
             "Invalid API key.",
             "auth_error",

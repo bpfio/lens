@@ -14,6 +14,15 @@ BACKUP_BACKEND_MODEL: str = os.environ.get("BACKUP_BACKEND_MODEL", BACKEND_MODEL
 # Passthrough mode — when upstream natively supports the protocol
 PASSTHROUGH_MODE: bool = os.environ.get("PASSTHROUGH_MODE", "false").lower() in ("true", "1", "yes")
 
+# Upstream capabilities: comma-separated list or "auto" (e.g. "anthropic,responses,chat")
+UPSTREAM_CAPABILITIES: str = os.environ.get("UPSTREAM_CAPABILITIES", "auto").lower()
+
+# Upstream protocol flavor: "standard" (Anthropic/OpenAI official) or "mimo" (Xiaomi MiMo)
+UPSTREAM_FLAVOR: str = os.environ.get("UPSTREAM_FLAVOR", "standard").lower()
+
+# Model override mode: "force" (legacy default), "mapped", or "passthrough"
+MODEL_OVERRIDE_MODE: str = os.environ.get("MODEL_OVERRIDE_MODE", "force").lower()
+
 # Display model names — returned to the client, never leaks the backend model.
 ANTHROPIC_DISPLAY_MODEL: str = os.environ.get("ANTHROPIC_DISPLAY_MODEL", "claude-fable-5")
 RESPONSES_DISPLAY_MODEL: str = os.environ.get("RESPONSES_DISPLAY_MODEL", "gpt-5.6-sol")
@@ -36,8 +45,40 @@ def get_env_int(key: str, default: int) -> int:
         return default
 
 
-def map_model_name(_model: str | None, _env: dict | None = None) -> str:
-    """Always return BACKEND_MODEL. Every incoming model is replaced."""
+def get_model_map() -> dict[str, str]:
+    """Parse MODEL_MAP environment variable as a JSON dict."""
+    raw = os.environ.get("MODEL_MAP", "").strip()
+    if not raw:
+        return {}
+    try:
+        import json
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def get_upstream_capabilities() -> set[str]:
+    """Return set of protocols supported natively by the upstream."""
+    raw = os.environ.get("UPSTREAM_CAPABILITIES", "auto").lower()
+    if raw and raw != "auto":
+        return {c.strip() for c in raw.split(",") if c.strip()}
+    if os.environ.get("PASSTHROUGH_MODE", "false").lower() in ("true", "1", "yes"):
+        return {"anthropic", "responses", "chat"}
+    return set()
+
+
+def map_model_name(model: str | None, _env: dict | None = None) -> str:
+    """Resolve model name based on MODEL_OVERRIDE_MODE and MODEL_MAP."""
+    mode = os.environ.get("MODEL_OVERRIDE_MODE", "force").lower()
+    if mode == "passthrough":
+        return model or BACKEND_MODEL
+    elif mode == "mapped":
+        mmap = get_model_map()
+        if model and model in mmap:
+            return mmap[model]
+        return model or BACKEND_MODEL
+    # default "force": legacy behavior, map everything to BACKEND_MODEL
     return BACKEND_MODEL
 
 

@@ -10,9 +10,10 @@ WorkingDirectory=/home/yupeng/lens
 ExecStart=/usr/bin/python3 -m aperture
 Restart=always
 RestartSec=5
-Environment=API_KEY=sk-VriyOzWq63bNVBkiaFgBMGcsAGgjHQIac7nkDYIih14dq2JWTv1rI7UYnAwxp50H
+EnvironmentFile=-/home/yupeng/lens/.env
+Environment=API_KEY=your-api-key-here
 Environment=UPSTREAM_BASE_URL=https://opencode.ai/zen/go/v1
-Environment=APERTURE_HOST=0.0.0.0
+Environment=APERTURE_HOST=127.0.0.1
 Environment=APERTURE_PORT=8080
 Environment=LOG_DIR=/home/yupeng/lens/logs
 

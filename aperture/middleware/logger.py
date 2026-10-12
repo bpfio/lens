@@ -7,8 +7,41 @@ import json
 import os
 import sys
 import time
+import queue
+import threading
 
 _LOG_FILE = None
+_LOG_QUEUE: queue.Queue | None = None
+_WORKER_THREAD: threading.Thread | None = None
+
+
+def _log_worker():
+    """Background worker for non-blocking disk I/O."""
+    while True:
+        try:
+            entry = _LOG_QUEUE.get()
+            if entry is None:
+                break
+            path = _LOG_FILE
+            if path is not None:
+                line = json.dumps(entry, default=str) + "\n"
+                try:
+                    if os.path.exists(path) and os.path.getsize(path) > 10 * 1024 * 1024:
+                        for i in range(4, 0, -1):
+                            old = f"{path}.{i}" if i > 0 else path
+                            new = f"{path}.{i + 1}"
+                            if os.path.exists(old):
+                                os.rename(old, new)
+                        if os.path.exists(path):
+                            os.rename(path, f"{path}.1")
+                except OSError:
+                    pass
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(line)
+        except Exception:
+            pass
+        finally:
+            _LOG_QUEUE.task_done()
 
 
 def configure_log_file(log_dir: str = "/var/log/lens") -> str:
@@ -17,40 +50,29 @@ def configure_log_file(log_dir: str = "/var/log/lens") -> str:
     Called once at app startup. Idempotent.
     Returns the log file path.
     """
-    global _LOG_FILE
+    global _LOG_FILE, _LOG_QUEUE, _WORKER_THREAD
     if _LOG_FILE is not None:
         return _LOG_FILE
 
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, "lens.log")
     _LOG_FILE = log_path
+
+    if _LOG_QUEUE is None:
+        _LOG_QUEUE = queue.Queue(maxsize=10000)
+        _WORKER_THREAD = threading.Thread(target=_log_worker, daemon=True, name="LensLogWorker")
+        _WORKER_THREAD.start()
+
     return log_path
 
 
 def _write_file(entry: dict) -> None:
-    """Append a JSON log line to the file, rotating at 10 MB."""
-    path = _LOG_FILE
-    if path is None:
-        return
-    try:
-        line = json.dumps(entry, default=str) + "\n"
-        # Check rotation: 10 MB
+    """Queue a log entry for non-blocking file write."""
+    if _LOG_QUEUE is not None:
         try:
-            size = os.path.getsize(path)
-            if size > 10 * 1024 * 1024:
-                for i in range(4, 0, -1):
-                    old = f"{path}.{i}" if i > 0 else path
-                    new = f"{path}.{i + 1}"
-                    if os.path.exists(old):
-                        os.rename(old, new)
-                if os.path.exists(path):
-                    os.rename(path, f"{path}.1")
-        except OSError:
+            _LOG_QUEUE.put_nowait(entry)
+        except queue.Full:
             pass
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(line)
-    except Exception:
-        pass
 
 
 class Logger:

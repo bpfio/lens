@@ -34,16 +34,26 @@ async def handle_anthropic_messages(body: dict, request: web.Request) -> web.Res
         return upstream_response
 
     if not upstream_response.ok:
+        err_text = ""
+        try:
+            err_text = await upstream_response.text()
+        except Exception:
+            pass
+        finally:
+            if hasattr(upstream_response, "release"):
+                upstream_response.release()
         if log:
             log.error("upstream.bad_status", {
                 "status": upstream_response.status,
                 "model": chat_req["model"],
+                "detail": err_text[:500] if err_text else "",
             })
+        msg = f"Upstream request failed: {err_text[:200]}" if err_text else "Upstream request failed"
         return web.json_response(
             {
                 "id": request_id,
                 "type": "error",
-                "error": {"type": "invalid_request_error", "message": "Upstream request failed"},
+                "error": {"type": "invalid_request_error", "message": msg},
             },
             status=upstream_response.status,
             headers={

@@ -112,4 +112,4 @@ async def fetch_upstream(
                     headers=dict(resp.headers),
                 )
     except asyncio.TimeoutError:
-        return web.Response(status=504, text=b"Gateway Timeout")
+        return web.Response(status=504, text="Gateway Timeout")

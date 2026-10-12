@@ -64,7 +64,26 @@ def normalize_dsml_tool_calls(response_body: dict) -> dict:
         )
         for p_match in param_pattern.finditer(block_content):
             if p_match.group(1):
-                args[p_match.group(1)] = (p_match.group(2) or "").strip()
+                raw_val = (p_match.group(2) or "").strip()
+                val = raw_val
+                if raw_val.lower() == "true":
+                    val = True
+                elif raw_val.lower() == "false":
+                    val = False
+                elif raw_val.lower() in ("null", "none"):
+                    val = None
+                else:
+                    try:
+                        val = int(raw_val)
+                    except ValueError:
+                        try:
+                            val = float(raw_val)
+                        except ValueError:
+                            try:
+                                val = json.loads(raw_val)
+                            except (json.JSONDecodeError, ValueError):
+                                val = raw_val
+                args[p_match.group(1)] = val
 
         if args:
             tool_calls.append({

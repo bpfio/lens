@@ -80,17 +80,16 @@ async def send_chat_request(
 
     timeout_ms = app.get("request_timeout", 120000)
     nvidia_timeout_ms = app.get("nvidia_timeout_ms", 300000)
-
-    # Rate limit — only for NVIDIA API (integrate.api.nvidia.com has 40 RPM limit)
-    # Other upstreams (sensenova, opencode, etc.) are not rate-limited here.
     is_nvidia = "integrate.api.nvidia.com" in url
+
+    # Rate limit — apply to all configured upstreams
     limiter: UpstreamRateLimiter | None = app.get("_upstream_limiter")
-    if limiter and is_nvidia:
+    if limiter:
         await limiter.acquire()
 
-    # Concurrency limit — prevent exceeding NVIDIA's worker pool (48 max concurrent)
+    # Concurrency limit — prevent exceeding upstream concurrency limit
     semaphore: asyncio.Semaphore | None = app.get("_upstream_semaphore")
-    if semaphore and is_nvidia:
+    if semaphore:
         await semaphore.acquire()
 
     try:
@@ -204,8 +203,29 @@ async def send_chat_request(
         )
 
     finally:
-        if semaphore and is_nvidia:
+        if semaphore:
             semaphore.release()
+
+
+def _get_cb_state(app: web.Application) -> tuple[int, float]:
+    cb_state = app.get("_cb_state")
+    if isinstance(cb_state, dict):
+        return cb_state.get("failures", 0), cb_state.get("open_until", 0.0)
+    return app.get("_cb_failures", 0), app.get("_cb_open_until", 0.0)
+
+
+def _set_cb_state(app: web.Application, failures: int, open_until: float) -> None:
+    cb_state = app.get("_cb_state")
+    if isinstance(cb_state, dict):
+        cb_state["failures"] = failures
+        cb_state["open_until"] = open_until
+        return
+    # Fallback for mock app dicts in unit tests
+    try:
+        app["_cb_failures"] = failures
+        app["_cb_open_until"] = open_until
+    except Exception:
+        pass
 
 
 async def send_with_fallback(
@@ -229,8 +249,7 @@ async def send_with_fallback(
     cb_cooldown = app.get("cb_cooldown_sec", 300)
 
     # Check circuit breaker state
-    cb_open_until = app.get("_cb_open_until", 0.0)
-    cb_failures = app.get("_cb_failures", 0)
+    cb_failures, cb_open_until = _get_cb_state(app)
     now = time.time()
 
     if cb_open_until > now and _has_backup(app):
@@ -249,19 +268,19 @@ async def send_with_fallback(
     resp = await send_chat_request(app, chat_body, log, session_id=session_id)
     if _is_success(resp):
         # Success — reset breaker
-        app["_cb_failures"] = 0
-        app["_cb_open_until"] = 0.0
+        _set_cb_state(app, 0, 0.0)
         return resp
 
     if _is_retryable(resp) and _has_backup(app):
         # Retryable failure — increment counter
-        app["_cb_failures"] = cb_failures + 1
-        if app["_cb_failures"] >= cb_threshold:
-            app["_cb_open_until"] = now + cb_cooldown
+        new_failures = cb_failures + 1
+        new_open_until = now + cb_cooldown if new_failures >= cb_threshold else 0.0
+        _set_cb_state(app, new_failures, new_open_until)
+        if new_failures >= cb_threshold:
             log and log.warn("upstream.circuit_breaker_tripped", {
-                "failures": app["_cb_failures"],
+                "failures": new_failures,
                 "cooldown_sec": cb_cooldown,
-                "open_until": app["_cb_open_until"],
+                "open_until": new_open_until,
             })
 
         log and log.warn("upstream.fallback", {
@@ -269,6 +288,8 @@ async def send_with_fallback(
             "from": app.get("upstream_base_url", ""),
             "to": app.get("backup_upstream_base_url", ""),
         })
+        if hasattr(resp, "release"):
+            resp.release()
         backup_url = _build_backup_url(app)
         backup_headers = _build_backup_headers(app, session_id=session_id)
         backup_body = _backup_chat_body(chat_body, app)

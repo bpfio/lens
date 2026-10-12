@@ -176,25 +176,24 @@ def translate_anthropic_to_chat(body: dict, env: dict | None = None) -> dict:
             if not isinstance(t, dict):
                 continue
             ttype = t.get("type", "")
-            if ttype in ("custom", "function") or (not ttype and t.get("name")):
+            tool_name = t.get("name") or (t.get("function") or {}).get("name") or ttype
+            if tool_name:
                 fn = t.get("function", t)
+                params = (
+                    fn.get("parameters")
+                    or t.get("parameters")
+                    or fn.get("input_schema")
+                    or t.get("input_schema", {})
+                )
+                if not isinstance(params, dict) or not params.get("type"):
+                    params = {"type": "object", "properties": {}}
                 tools.append({
                     "type": "function",
                     "function": {
-                        "name": fn.get("name", t.get("name", "")),
+                        "name": tool_name,
                         "description": fn.get("description", t.get("description", "")),
-                        "parameters": (
-                            fn.get("parameters")
-                            or t.get("parameters")
-                            or fn.get("input_schema")
-                            or t.get("input_schema", {})
-                        ),
-                        "input_schema": (
-                            fn.get("input_schema")
-                            or t.get("input_schema")
-                            or fn.get("parameters")
-                            or t.get("parameters", {})
-                        ),
+                        "parameters": params,
+                        "input_schema": params,
                     },
                 })
         if tools:
@@ -244,6 +243,7 @@ async def translate_anthropic_stream(
 
     content_index = 0
     text_block_index = -1  # -1 = no text block currently open
+    thinking_block_index = -1
     tool_use_map: dict[int, dict] = {}
     last_finish_reason = None
     stream_usage = {"input_tokens": 0, "output_tokens": 0}
@@ -263,13 +263,40 @@ async def translate_anthropic_stream(
             delta = choice.get("delta", {}) or {}
             if not isinstance(delta, dict):
                 delta = {}
-            # Strip upstream-specific fields that deepseek sends
-            delta.pop("reasoning_content", None)
+            reasoning = delta.get("reasoning_content", "") or ""
             content = delta.get("content", "") or ""
             tool_calls = delta.get("tool_calls")
             finish_reason = choice.get("finish_reason")
             if finish_reason:
                 last_finish_reason = finish_reason
+
+            # Thinking content
+            if reasoning:
+                if thinking_block_index == -1:
+                    thinking_block_index = content_index
+                    yield {
+                        "event": "content_block_start",
+                        "data": {
+                            "type": "content_block_start",
+                            "index": thinking_block_index,
+                            "content_block": {"type": "thinking", "thinking": ""},
+                        },
+                    }
+                yield {
+                    "event": "content_block_delta",
+                    "data": {
+                        "type": "content_block_delta",
+                        "index": thinking_block_index,
+                        "delta": {"type": "thinking_delta", "thinking": reasoning},
+                    },
+                }
+            elif thinking_block_index != -1 and (content or tool_calls):
+                yield {
+                    "event": "content_block_stop",
+                    "data": {"type": "content_block_stop", "index": thinking_block_index},
+                }
+                content_index += 1
+                thinking_block_index = -1
 
             # Text content: open block once, accumulate deltas, close once
             if content:
@@ -350,6 +377,13 @@ async def translate_anthropic_stream(
                     }
                     del tool_use_map[key]
 
+    # Close any open thinking block
+    if thinking_block_index != -1:
+        yield {
+            "event": "content_block_stop",
+            "data": {"type": "content_block_stop", "index": thinking_block_index},
+        }
+
     # Close any open text block
     if text_block_index != -1:
         yield {
@@ -384,6 +418,11 @@ async def translate_anthropic_json(
     choice = (data.get("choices") or [{}])[0]
     message = choice.get("message", {})
     content = []
+
+    # Thinking content
+    reasoning = message.get("reasoning_content")
+    if reasoning:
+        content.append({"type": "thinking", "thinking": reasoning})
 
     # Text content
     msg_content = message.get("content", "")

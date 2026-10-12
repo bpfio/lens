@@ -36,7 +36,23 @@ def test_rewrite_request_body_model():
     assert rewritten["input"] == "Hello"
 
 
-def test_rewrite_request_body_filters_web_search():
+def test_rewrite_request_body_preserves_web_search_by_default(monkeypatch):
+    monkeypatch.delenv("FILTER_WEB_SEARCH", raising=False)
+    body = {
+        "model": "gpt-5.6-sol",
+        "tools": [
+            {"type": "function", "name": "bash"},
+            {"type": "web_search"},
+            {"type": "web_search_preview"},
+        ],
+    }
+    rewritten, original = rewrite_request_body(body, "mimo-v2.6-flash", "responses")
+    assert original == "gpt-5.6-sol"
+    assert len(rewritten["tools"]) == 3
+
+
+def test_rewrite_request_body_filters_web_search_when_enabled(monkeypatch):
+    monkeypatch.setenv("FILTER_WEB_SEARCH", "true")
     body = {
         "model": "gpt-5.6-sol",
         "tools": [
