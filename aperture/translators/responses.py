@@ -18,8 +18,7 @@ def _normalize_tool(t: dict) -> dict | None:
     Handles both flat {"name": ..., "parameters": ...} and nested
     {"function": {...}} forms, plus codex's {"type":"custom", "input_schema": ...}.
 
-    Empty or invalid parameters ({}) are normalized to a valid JSON Schema —
-    Console Go upstreams reject {} with 400 "Upstream request failed".
+    Preserves strict schema validation mode if specified.
     """
     fn = t.get("function", t)
     name = fn.get("name", "")
@@ -28,7 +27,7 @@ def _normalize_tool(t: dict) -> dict | None:
     params = fn.get("parameters", fn.get("input_schema", {}))
     if not isinstance(params, dict) or not params.get("type"):
         params = {"type": "object", "properties": {}}
-    return {
+    tool_dict = {
         "type": "function",
         "function": {
             "name": name,
@@ -36,6 +35,11 @@ def _normalize_tool(t: dict) -> dict | None:
             "parameters": params,
         },
     }
+    # Preserve strict mode if specified in function or outer tool
+    strict_val = fn.get("strict", t.get("strict"))
+    if strict_val is not None:
+        tool_dict["function"]["strict"] = bool(strict_val)
+    return tool_dict
 
 
 def translate_to_chat(body: dict) -> dict:
@@ -232,6 +236,37 @@ def translate_to_chat(body: dict) -> dict:
     if "stop" in body:
         chat["stop"] = body["stop"]
 
+    # Map reasoning (effort / thinking intensity)
+    if "reasoning" in body:
+        reasoning_cfg = body["reasoning"]
+        if isinstance(reasoning_cfg, dict):
+            if "effort" in reasoning_cfg:
+                chat["reasoning_effort"] = reasoning_cfg["effort"]
+            chat["reasoning"] = reasoning_cfg
+        elif isinstance(reasoning_cfg, str):
+            chat["reasoning_effort"] = reasoning_cfg
+
+    # Map text format (structured outputs)
+    if "text" in body and isinstance(body["text"], dict):
+        text_cfg = body["text"]
+        fmt = text_cfg.get("format")
+        if isinstance(fmt, dict):
+            chat["response_format"] = fmt
+        elif fmt == "json":
+            chat["response_format"] = {"type": "json_object"}
+
+    # Map parallel_tool_calls
+    if "parallel_tool_calls" in body:
+        chat["parallel_tool_calls"] = bool(body["parallel_tool_calls"])
+
+    # Map caching and tracking parameters
+    if "prompt_cache_key" in body:
+        chat["prompt_cache_key"] = body["prompt_cache_key"]
+    if "safety_identifier" in body:
+        chat["safety_identifier"] = body["safety_identifier"]
+    if "service_tier" in body:
+        chat["service_tier"] = body["service_tier"]
+
     # Map tools
     tools = []
     if "tools" in body and body["tools"]:
@@ -252,7 +287,20 @@ def translate_to_chat(body: dict) -> dict:
             tools.append(norm)
     if tools:
         chat["tools"] = tools
-        chat["tool_choice"] = body.get("tool_choice", "auto")
+
+    # Normalize tool_choice to Chat Completions format
+    raw_tc = body.get("tool_choice")
+    if isinstance(raw_tc, dict):
+        # Responses format: {"type": "function", "name": "foo"} -> Chat format: {"type": "function", "function": {"name": "foo"}}
+        if raw_tc.get("type") == "function" and "function" not in raw_tc:
+            func_name = raw_tc.get("name", "")
+            chat["tool_choice"] = {"type": "function", "function": {"name": func_name}}
+        else:
+            chat["tool_choice"] = raw_tc
+    elif raw_tc is not None:
+        chat["tool_choice"] = raw_tc
+    elif tools:
+        chat["tool_choice"] = "auto"
 
     # Metadata
     metadata = body.get("metadata")
@@ -270,35 +318,102 @@ async def translate_stream_events(
     """Translate upstream Chat Completions SSE to Responses API events.
 
     Yields {event, data} dicts for pipe_sse().
+    Emits reasoning output items and deltas if reasoning_content is present.
     """
     content_index = 0
     item_index = 0
     text_item_added = False
     text_item_id = f"{resp_id}/item_0"
     accumulated_text = ""
+
+    reasoning_item_added = False
+    reasoning_item_done = False
+    reasoning_item_id = f"{resp_id}/reasoning_0"
+    accumulated_reasoning = ""
+    reasoning_output_index = 0
+
     last_finish_reason = None
     tool_call_items: dict[int, dict] = {}
     arguments_done_sent: set[int] = set()
+    latest_usage: dict = {}
 
     async for chunk in stream_sse(response):
+        if "usage" in chunk and isinstance(chunk["usage"], dict):
+            latest_usage = chunk["usage"]
+
         for choice in chunk.get("choices", []):
             delta = choice.get("delta", {}) or {}
             finish_reason = choice.get("finish_reason")
             if finish_reason:
                 last_finish_reason = finish_reason
 
+            reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
             content = delta.get("content", "")
             tool_calls = delta.get("tool_calls")
 
-            # Text content
+            # 1. Reasoning content stream
+            if reasoning:
+                if not reasoning_item_added:
+                    reasoning_item_added = True
+                    yield {
+                        "event": "response.output_item.added",
+                        "data": {
+                            "type": "response.output_item.added",
+                            "output_index": reasoning_output_index,
+                            "item": {
+                                "id": reasoning_item_id,
+                                "type": "reasoning",
+                                "status": "in_progress",
+                                "summary": [],
+                            },
+                        },
+                    }
+                accumulated_reasoning += reasoning
+                yield {
+                    "event": "response.reasoning.delta",
+                    "data": {
+                        "type": "response.reasoning.delta",
+                        "output_index": reasoning_output_index,
+                        "delta": reasoning,
+                    },
+                }
+
+            # If reasoning was active and we now see text content, tool calls, or finish_reason, finalize reasoning
+            if (content or tool_calls or finish_reason) and (reasoning_item_added and not reasoning_item_done):
+                reasoning_item_done = True
+                yield {
+                    "event": "response.reasoning.done",
+                    "data": {
+                        "type": "response.reasoning.done",
+                        "output_index": reasoning_output_index,
+                        "text": accumulated_reasoning,
+                    },
+                }
+                yield {
+                    "event": "response.output_item.done",
+                    "data": {
+                        "type": "response.output_item.done",
+                        "output_index": reasoning_output_index,
+                        "item": {
+                            "id": reasoning_item_id,
+                            "type": "reasoning",
+                            "status": "completed",
+                            "summary": [],
+                            "text": accumulated_reasoning,
+                        },
+                    },
+                }
+
+            # 2. Text content stream
             if content:
+                text_output_idx = 1 if reasoning_item_added else 0
                 if not text_item_added:
                     text_item_added = True
                     yield {
                         "event": "response.output_item.added",
                         "data": {
                             "type": "response.output_item.added",
-                            "output_index": 0,
+                            "output_index": text_output_idx,
                             "item": {
                                 "id": text_item_id,
                                 "type": "message",
@@ -312,7 +427,7 @@ async def translate_stream_events(
                         "event": "response.content_part.added",
                         "data": {
                             "type": "response.content_part.added",
-                            "output_index": 0,
+                            "output_index": text_output_idx,
                             "part": {
                                 "type": "output_text",
                                 "text": "",
@@ -324,13 +439,13 @@ async def translate_stream_events(
                     "event": "response.output_text.delta",
                     "data": {
                         "type": "response.output_text.delta",
-                        "output_index": 0,
+                        "output_index": text_output_idx,
                         "content_index": content_index,
                         "delta": content,
                     },
                 }
 
-            # Tool calls
+            # 3. Tool calls stream
             if tool_calls:
                 for tc in tool_calls:
                     fn = tc.get("function", {})
@@ -338,7 +453,7 @@ async def translate_stream_events(
                     idx = tc.get("index", 0)
                     if idx not in tool_call_items:
                         item_index += 1
-                        tool_output_idx = (1 if text_item_added else 0) + len(tool_call_items)
+                        tool_output_idx = (1 if reasoning_item_added else 0) + (1 if text_item_added else 0) + len(tool_call_items)
                         tool_call_items[idx] = {
                             "item_id": f"{resp_id}/item_{item_index}",
                             "output_index": tool_output_idx,
@@ -387,14 +502,48 @@ async def translate_stream_events(
                             },
                         }
 
-    # Finalize text output
+    # Finalize reasoning if not yet done
     output_items = []
+    if reasoning_item_added:
+        if not reasoning_item_done:
+            yield {
+                "event": "response.reasoning.done",
+                "data": {
+                    "type": "response.reasoning.done",
+                    "output_index": reasoning_output_index,
+                    "text": accumulated_reasoning,
+                },
+            }
+            yield {
+                "event": "response.output_item.done",
+                "data": {
+                    "type": "response.output_item.done",
+                    "output_index": reasoning_output_index,
+                    "item": {
+                        "id": reasoning_item_id,
+                        "type": "reasoning",
+                        "status": "completed",
+                        "summary": [],
+                        "text": accumulated_reasoning,
+                    },
+                },
+            }
+        output_items.append({
+            "id": reasoning_item_id,
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [],
+            "text": accumulated_reasoning,
+        })
+
+    # Finalize text output
     if text_item_added and accumulated_text:
+        text_output_idx = 1 if reasoning_item_added else 0
         yield {
             "event": "response.output_text.done",
             "data": {
                 "type": "response.output_text.done",
-                "output_index": 0,
+                "output_index": text_output_idx,
                 "content_index": content_index,
                 "text": accumulated_text,
             },
@@ -403,7 +552,7 @@ async def translate_stream_events(
             "event": "response.content_part.done",
             "data": {
                 "type": "response.content_part.done",
-                "output_index": 0,
+                "output_index": text_output_idx,
                 "content_index": content_index,
                 "part": {"type": "output_text", "text": accumulated_text},
             },
@@ -412,7 +561,7 @@ async def translate_stream_events(
             "event": "response.output_item.done",
             "data": {
                 "type": "response.output_item.done",
-                "output_index": 0,
+                "output_index": text_output_idx,
                 "item": {
                     "id": text_item_id,
                     "type": "message",
@@ -467,7 +616,7 @@ async def translate_stream_events(
             "arguments": item["arguments"],
         })
 
-    # Final response object (shared by response.completed and response.done)
+    # Build final response object
     final_response = {
         "id": resp_id,
         "object": "response",
@@ -476,6 +625,17 @@ async def translate_stream_events(
         "model": model,
         "output": output_items,
     }
+    if latest_usage:
+        usage_dict = {
+            "input_tokens": latest_usage.get("prompt_tokens", latest_usage.get("input_tokens", 0)),
+            "output_tokens": latest_usage.get("completion_tokens", latest_usage.get("output_tokens", 0)),
+            "total_tokens": latest_usage.get("total_tokens", 0),
+        }
+        if "prompt_tokens_details" in latest_usage:
+            usage_dict["input_token_details"] = latest_usage["prompt_tokens_details"]
+        if "completion_tokens_details" in latest_usage:
+            usage_dict["output_token_details"] = latest_usage["completion_tokens_details"]
+        final_response["usage"] = usage_dict
 
     yield {
         "event": "response.completed",
@@ -506,7 +666,18 @@ async def translate_response_json(
 
     output = []
 
-    # Text output
+    # 1. Reasoning output
+    reasoning_content = message.get("reasoning_content") or message.get("reasoning", "")
+    if reasoning_content:
+        output.append({
+            "id": f"{resp_id}/reasoning",
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [],
+            "text": reasoning_content,
+        })
+
+    # 2. Text output
     content = message.get("content", "")
     if content:
         output.append({
@@ -519,7 +690,7 @@ async def translate_response_json(
             ],
         })
 
-    # Tool call output
+    # 3. Tool call output
     for tc in message.get("tool_calls", []):
         fn = tc.get("function", {})
         output.append({
@@ -532,6 +703,16 @@ async def translate_response_json(
         })
 
     usage = data.get("usage", {})
+    usage_dict = {
+        "input_tokens": usage.get("prompt_tokens", usage.get("input_tokens", 0)),
+        "output_tokens": usage.get("completion_tokens", usage.get("output_tokens", 0)),
+        "total_tokens": usage.get("total_tokens", 0),
+    }
+    if "prompt_tokens_details" in usage:
+        usage_dict["input_token_details"] = usage["prompt_tokens_details"]
+    if "completion_tokens_details" in usage:
+        usage_dict["output_token_details"] = usage["completion_tokens_details"]
+
     return {
         "id": resp_id,
         "object": "response",
@@ -539,9 +720,5 @@ async def translate_response_json(
         "model": model,
         "status": "completed",
         "output": output,
-        "usage": {
-            "input_tokens": usage.get("prompt_tokens", usage.get("input_tokens", 0)),
-            "output_tokens": usage.get("completion_tokens", usage.get("output_tokens", 0)),
-            "total_tokens": usage.get("total_tokens", 0),
-        },
+        "usage": usage_dict,
     }

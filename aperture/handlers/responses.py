@@ -22,7 +22,15 @@ async def handle_responses_api(body: dict, request: web.Request) -> web.Response
         log.info("model.mapped", {"from": original_model, "to": chat_req["model"]})
 
     session_id = extract_session_id(request)
-    upstream_response = await send_with_fallback(app, chat_req, log, session_id=session_id)
+    query_str = request.rel_url.raw_query_string
+    upstream_response = await send_with_fallback(
+        app,
+        chat_req,
+        log,
+        session_id=session_id,
+        query_string=query_str,
+        extra_headers=dict(request.headers),
+    )
 
     if isinstance(upstream_response, web.Response):
         return upstream_response
@@ -43,6 +51,9 @@ async def handle_responses_api(body: dict, request: web.Request) -> web.Response
                 "detail": err_text[:500] if err_text else "",
             })
         msg = f"Upstream request failed: {err_text[:200]}" if err_text else "Upstream request failed"
+        resp_headers = cors_headers()
+        if "Retry-After" in upstream_response.headers:
+            resp_headers["Retry-After"] = upstream_response.headers["Retry-After"]
         return web.json_response(
             {
                 "id": resp_id,
@@ -57,7 +68,7 @@ async def handle_responses_api(body: dict, request: web.Request) -> web.Response
                 },
             },
             status=upstream_response.status,
-            headers=cors_headers(),
+            headers=resp_headers,
         )
 
     if chat_req.get("stream"):

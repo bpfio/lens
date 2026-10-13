@@ -521,3 +521,32 @@ gpt-5.6-sol
   - 本机开发：同机部署保持 `AUTH_ALLOW_LOCAL=true`，本地回环（`127.0.0.1`）访问两款 CLI 维持免密直通；
   - 远程/跨节点访问：封堵 `192.168.*` 泛免密后，异机调用需在客户端显式配置 `Authorization: Bearer <API_KEY>`。
 
+---
+
+## 六、 Codex CLI 第三方 Provider 兼容性架构升级与全语义适配闭环（2026-10-13）
+
+针对 Codex 审查报告（`codex-third-party-compatibility-review-2026-10-13.md`）指出的 10 项缺陷，完成从单模型翻译网关向多 Provider 全语义网关的系统性升级：
+
+### 1. 核心架构升级与 Provider 注册表（P1-4, P1-5）
+- **多 Provider 注册中心**：新增 `aperture/providers.py`，实现 `ProviderConfig`、`ProviderRegistry` 与 `ModelRouter`；
+- 支持为不同模型独立配置上游 `base_url`、`wire_api`、`api_key`、`headers`、`query_params`、`timeout` 与细粒度能力策略（`capabilities`）；
+- 向后平滑兼容全局环境变量，既有单上游部署零成本平移。
+
+### 2. Responses 参数与工具规范对齐（P1-1, P1-2）
+- **关键参数保留**：映射 `reasoning`（推理强度至 `reasoning_effort`）、`text.format`（结构化输出至 `response_format`）、`parallel_tool_calls` 以及缓存/追踪参数；
+- **strict 严格模式保留**：`_normalize_tool` 完整保留 `strict: True` 属性；
+- **tool_choice 规范转换**：将 Responses 的 `{"type": "function", "name": "foo"}` 自动转换为符合 Chat Completions 规范的 `{"type": "function", "function": {"name": "foo"}}`。
+
+### 3. 推理流与 SSE 事件全链路重构（P1-3）
+- **思考流发射**：`translate_stream_events` 实时捕获 upstream chunk 中的 `reasoning_content`，发射 Responses 规范的 `response.output_item.added (type: reasoning)`、`response.reasoning.delta` 与 `response.reasoning.done` 事件；
+- **非流式推理与 Usage 细化**：`translate_response_json` 映射 reasoning item；输出完整的 `input_token_details` 与 `output_token_details`（含 `reasoning_tokens`）。
+
+### 4. 传输增强与状态化边界（P2-1, P2-2, P2-4）
+- **客户端 Headers 与 Query 透传**：`send_chat_request` 自动追加客户端原始 query string，透传 `OpenAI-*` 与追踪头；保留上游 429 的 `Retry-After` 头；
+- **结构化模型能力目录**：`/v1/models` 输出包含 `context_window: 128000`、`supports_reasoning`、`supports_tools` 等能力元数据；
+- **状态化边界防混淆**：明确拦截 `/v1/responses/{id}` 等状态化端点，在 Chat-only 翻译模式下返回规范的 HTTP 400（`UNSUPPORTED_STATEFUL_RESPONSES`）。
+
+### 5. 版本化黄金契约测试（P3）
+- 新增 `tests/test_codex_provider_contract.py`，覆盖全部 10 项新增契约；
+- 全量回归测试：**156 passed in 4.37s（通过率 100%）**。
+

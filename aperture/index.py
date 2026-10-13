@@ -42,6 +42,8 @@ def _detect_route(path: str, body: dict) -> str:
         return "anthropic"
     if cleaned in ("v1/responses", "responses") or cleaned.endswith("/responses"):
         return "responses"
+    if cleaned.startswith("v1/responses/") or cleaned.startswith("responses/"):
+        return "responses_stateful"
 
     # Known non-translation standard endpoints should remain unknown (passthrough)
     known_passthrough_prefixes = (
@@ -66,40 +68,41 @@ def _detect_route(path: str, body: dict) -> str:
 
 
 async def _handle_list_models(request: web.Request) -> web.Response:
-    """Build and return the model list with dynamic mappings."""
+    """Build and return the model list with dynamic mappings and capability metadata."""
     models_data = []
     seen = set()
 
+    def _make_model_entry(model_id: str) -> dict:
+        is_reasoning = any(x in model_id.lower() for x in ("r1", "qwq", "o1", "o3", "mimo", "flash"))
+        return {
+            "id": model_id,
+            "object": "model",
+            "created": 1780000000,
+            "owned_by": "lens",
+            "context_window": 128000,
+            "max_output_tokens": 8192,
+            "capabilities": {
+                "supports_reasoning": is_reasoning,
+                "supports_tools": True,
+                "supports_structured_output": True,
+            },
+        }
+
     # Backend model
-    models_data.append({
-        "id": BACKEND_MODEL,
-        "object": "model",
-        "created": 1780000000,
-        "owned_by": "lens",
-    })
+    models_data.append(_make_model_entry(BACKEND_MODEL))
     seen.add(BACKEND_MODEL)
 
     # Display models
     for m in (ANTHROPIC_DISPLAY_MODEL, RESPONSES_DISPLAY_MODEL, CHAT_DISPLAY_MODEL):
         if m and m not in seen:
-            models_data.append({
-                "id": m,
-                "object": "model",
-                "created": 1780000000,
-                "owned_by": "lens",
-            })
+            models_data.append(_make_model_entry(m))
             seen.add(m)
 
     # Mapped aliases
     mmap = get_model_map()
     for alias in mmap:
         if alias not in seen:
-            models_data.append({
-                "id": alias,
-                "object": "model",
-                "created": 1780000000,
-                "owned_by": "lens",
-            })
+            models_data.append(_make_model_entry(alias))
             seen.add(alias)
 
     return web.json_response({"data": models_data}, headers=cors_headers())
@@ -285,7 +288,7 @@ async def auth_middleware(request: web.Request, handler) -> web.Response:
 async def _handle_dispatch(request: web.Request) -> web.Response:
     log = request.get("log")
     method = request.method.upper()
-    path = request.match_info.get("path", "")
+    path = request.match_info.get("path") or request.path
 
     body = None
     if method not in ("GET", "HEAD", "DELETE"):
@@ -306,10 +309,8 @@ async def _handle_dispatch(request: web.Request) -> web.Response:
     route = _detect_route(path, body or {})
     capabilities = get_upstream_capabilities()
 
-    # If upstream natively supports the protocol, PASSTHROUGH_MODE is enabled,
-    # or the endpoint is an arbitrary/derived endpoint (e.g. embeddings, files, batches),
-    # proxy directly with full-path and header fidelity
-    is_passthrough = PASSTHROUGH_MODE or (route in capabilities) or (route == "unknown")
+    passthrough_enabled = os.environ.get("PASSTHROUGH_MODE", "false").lower() in ("true", "1", "yes")
+    is_passthrough = passthrough_enabled or (route in capabilities) or (route == "unknown")
 
     if log:
         log.info("route.detect", {
@@ -319,6 +320,16 @@ async def _handle_dispatch(request: web.Request) -> web.Response:
             "passthrough": is_passthrough,
             "capabilities": list(capabilities),
         })
+
+    if route == "responses_stateful":
+        if passthrough_enabled or "responses" in capabilities:
+            return await handle_passthrough(body, request, route)
+        return error_response(
+            "Stateful response retrieval/cancellation is not supported by Chat-only upstreams in translation mode.",
+            "unsupported_feature",
+            "UNSUPPORTED_STATEFUL_RESPONSES",
+            400,
+        )
 
     if is_passthrough:
         return await handle_passthrough(body, request, route)

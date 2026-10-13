@@ -35,6 +35,12 @@ def build_auth_headers(app: web.Application, session_id: str | None = None) -> d
     return headers
 
 
+HOP_BY_HOP_HEADERS = {
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
+}
+
+
 async def send_chat_request(
     app: web.Application,
     chat_body: dict,
@@ -42,20 +48,26 @@ async def send_chat_request(
     url_override: str | None = None,
     headers_override: dict | None = None,
     session_id: str | None = None,
+    query_string: str = "",
+    extra_headers: dict | None = None,
 ) -> ClientResponse | web.Response:
     """Send a Chat Completions request to the upstream API.
 
     Uses the app's shared aiohttp ClientSession.
     On network error, returns a 502 web.Response with a structured error body.
-
-    Categorizes upstream errors:
-    - Timeout → 504
-    - Connection refused/DNS failure → 502 with UPSTREAM_UNREACHABLE
-    - Other client errors → 502 with UPSTREAM_ERROR
-    - Unexpected → 502 with INTERNAL_ERROR
     """
     url = url_override or build_upstream_url(app)
+    if query_string:
+        delimiter = "&" if "?" in url else "?"
+        url = f"{url}{delimiter}{query_string}"
+
     headers = dict(headers_override) if headers_override else build_auth_headers(app, session_id=session_id)
+    if extra_headers:
+        for k, v in extra_headers.items():
+            kl = k.lower()
+            if kl not in HOP_BY_HOP_HEADERS and kl not in ("content-type", "authorization"):
+                headers[k] = v
+
     sid = session_id or app.get("default_session_id")
     if sid and "x-opencode-session" not in headers:
         headers["x-opencode-session"] = sid
@@ -233,6 +245,8 @@ async def send_with_fallback(
     chat_body: dict,
     log: Logger | None = None,
     session_id: str | None = None,
+    query_string: str = "",
+    extra_headers: dict | None = None,
 ) -> ClientResponse | web.Response:
     """Send request with primary/backup fallback and circuit breaker.
 
@@ -262,10 +276,15 @@ async def send_with_fallback(
         backup_url = _build_backup_url(app)
         backup_headers = _build_backup_headers(app, session_id=session_id)
         backup_body = _backup_chat_body(chat_body, app)
-        return await send_chat_request(app, backup_body, log, url_override=backup_url, headers_override=backup_headers, session_id=session_id)
+        return await send_chat_request(
+            app, backup_body, log, url_override=backup_url, headers_override=backup_headers,
+            session_id=session_id, query_string=query_string, extra_headers=extra_headers,
+        )
 
     # Step 1: Try primary
-    resp = await send_chat_request(app, chat_body, log, session_id=session_id)
+    resp = await send_chat_request(
+        app, chat_body, log, session_id=session_id, query_string=query_string, extra_headers=extra_headers,
+    )
     if _is_success(resp):
         # Success — reset breaker
         _set_cb_state(app, 0, 0.0)
